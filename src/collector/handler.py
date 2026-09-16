@@ -42,6 +42,8 @@ TRIP_OFFSET_S: Final[float] = 0.0
 MAX_CONCURRENT_POLLS: Final[int] = 2
 MAX_OFFSET_S: Final[float] = 55.0
 
+_repository_cache: dict[str, RawFeedRepository] = {}
+
 
 def validate_offset(*, offset: float) -> None:
     """Reject an offset that cannot fit inside one invocation.
@@ -107,6 +109,31 @@ def read_api_key() -> str:
     return parameters.get_parameter(
         os.environ['API_KEY_PARAMETER_NAME'], decrypt=True, max_age=3600,
     )
+
+
+def get_repository() -> RawFeedRepository:
+    """Build or reuse this execution environment's S3 repository.
+
+    ``BUCKET_NAME`` is read on every call, not only on a cache miss,
+    so a missing variable still raises here rather than being
+    masked by an entry a previous invocation already cached. The
+    boto3 client itself is created at most once per bucket per
+    execution environment, instead of once per invocation.
+
+    Returns
+    -------
+    RawFeedRepository
+        The cached repository for the current ``BUCKET_NAME``.
+
+    Raises
+    ------
+    KeyError
+        If ``BUCKET_NAME`` is not set.
+    """
+    bucket = os.environ['BUCKET_NAME']
+    if bucket not in _repository_cache:
+        _repository_cache[bucket] = RawFeedRepository(bucket=bucket)
+    return _repository_cache[bucket]
 
 
 def poll_schedule() -> list[tuple[float, Feed]]:
@@ -635,7 +662,7 @@ def handler(
     counts = collect(
         schedule=poll_schedule(),
         api_key=read_api_key(),
-        repository=RawFeedRepository(bucket=os.environ['BUCKET_NAME']),
+        repository=get_repository(),
         invocation_id=context.aws_request_id,
     )
     logger.info('Collection complete', extra=counts)

@@ -53,6 +53,18 @@ TIMING_SCHEDULE: list[tuple[float, Feed]] = [
 SIMULATED_ROUND_TRIP_S = 0.2
 
 
+@pytest.fixture(autouse=True)
+def _clear_repository_cache() -> None:
+    """Reset the cached repository so each test sees a fresh env.
+
+    Without this, whichever test happens to run first would decide
+    every later test's cached client, hiding the very bug the cache
+    exists to avoid re-testing each time.
+    """
+    # pylint: disable-next=protected-access
+    handler_module._repository_cache.clear()
+
+
 class _FlakyRepository(RawFeedRepository):
     """A repository whose first ``put_raw`` call always raises."""
 
@@ -273,6 +285,34 @@ def test_handler_collects_and_stores_end_to_end(
     client = boto3.client('s3', region_name=REGION)
     listing = client.list_objects_v2(Bucket=_bucket, Prefix='raw/')
     assert listing['KeyCount'] == 3
+
+
+@responses.activate
+def test_handler_reuses_one_repository_across_invocations(
+    _bucket: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv('BUCKET_NAME', _bucket)
+    monkeypatch.setenv('TFNSW_API_KEY', 'k')
+    monkeypatch.setenv('VEHICLE_OFFSETS_S', '0')
+    responses.add(responses.GET, VEHICLE_URL, body=b'vp', status=200)
+    responses.add(responses.GET, TRIP_URL, body=b'tu', status=200)
+    calls = 0
+    real_init = RawFeedRepository.__init__
+
+    def _counting_init(self, **kwargs):
+        nonlocal calls
+        calls += 1
+        real_init(self, **kwargs)
+
+    monkeypatch.setattr(
+        RawFeedRepository, '__init__', _counting_init,
+    )
+
+    handler({}, _Context())
+    handler({}, _Context())
+
+    assert calls == 1
 
 
 def test_handler_requires_bucket_name(
