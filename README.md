@@ -46,3 +46,17 @@ the live bucket. It resolves the bucket from `--bucket`, then
 output (`--stack-name`, default `sydney-bus-reliability`). AWS
 credentials come from `--profile` if given, else the standard
 credential chain (e.g. `AWS_PROFILE`).
+
+Pass `--memory` to also report the collector Lambda's memory and
+duration envelope for that day. This section is sourced from
+CloudWatch Logs Insights (`@maxMemoryUsed` and `@duration` on the
+REPORT log lines), not from the S3 audit trail, so it needs
+`logs:StartQuery`/`logs:GetQueryResults` on the function's log
+group and `lambda:GetFunctionConfiguration` on the function. It
+reports the observed maximum memory used, the headroom against
+the configured memory ceiling (in MB and as a percentage), a
+per-10-minute-bin breakdown, the number of invocations seen (so a
+partial sample is distinguishable from a full day), and the
+maximum observed duration against the configured timeout. It is
+opt-in because it is a second, slower data source with its own
+IAM requirements, on top of the always-on S3-backed report.

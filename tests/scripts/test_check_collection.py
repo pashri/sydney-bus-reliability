@@ -2,7 +2,7 @@
 
 from http import HTTPStatus
 
-from scripts.check_collection import summarize_day
+from scripts.check_collection import summarize_day, summarize_memory
 from src.common.types_ import Feed, RunRecord
 
 DATE = '2026-09-15'
@@ -175,3 +175,75 @@ def test_summarize_day_windows_a_partial_day() -> None:
     assert summary.coverage.minutes_short == 1
     vp = summary.feed_counts['vehiclepos']
     assert vp.expected == 5 * 6
+
+
+def _memory_row(
+    *,
+    bin_label: str = '2026-09-15 00:00:00.000',
+    max_mb: float = 200.0,
+    max_duration_ms: float = 51_000.0,
+    invocations: int = 6,
+) -> dict[str, str]:
+    """Build one raw Logs Insights memory-query result row."""
+    return {
+        'bin(10m)': bin_label,
+        'maxMB': str(max_mb),
+        'maxDurationMs': str(max_duration_ms),
+        'invocations': str(invocations),
+    }
+
+
+def test_summarize_memory_none_when_no_rows() -> None:
+    assert summarize_memory([], memory_size_mb=384) is None
+
+
+def test_summarize_memory_headroom_arithmetic() -> None:
+    rows = [_memory_row(max_mb=200.0)]
+    summary = summarize_memory(rows, memory_size_mb=384)
+    assert summary is not None
+    assert summary.headroom.max_used_mb == 200.0
+    assert summary.headroom.headroom_mb == 184.0
+    expected_pct = round(184 / 384 * 100, 2)
+    assert round(summary.headroom.headroom_pct, 2) == expected_pct
+
+
+def test_summarize_memory_close_to_ceiling() -> None:
+    rows = [_memory_row(max_mb=370.0)]
+    summary = summarize_memory(rows, memory_size_mb=384)
+    assert summary is not None
+    assert summary.headroom.headroom_mb == 14.0
+    expected_pct = round(14 / 384 * 100, 2)
+    assert round(summary.headroom.headroom_pct, 2) == expected_pct
+
+
+def test_summarize_memory_takes_max_across_bins() -> None:
+    rows = [
+        _memory_row(bin_label='2026-09-15 00:00:00.000', max_mb=210.0),
+        _memory_row(bin_label='2026-09-15 00:10:00.000', max_mb=290.0),
+        _memory_row(bin_label='2026-09-15 00:20:00.000', max_mb=250.0),
+    ]
+    summary = summarize_memory(rows, memory_size_mb=384)
+    assert summary is not None
+    assert summary.headroom.max_used_mb == 290.0
+    assert summary.max_duration_ms == 51_000.0
+
+
+def test_summarize_memory_sums_invocations_and_sorts_bins() -> None:
+    rows = [
+        _memory_row(bin_label='2026-09-15 00:20:00.000', invocations=6),
+        _memory_row(bin_label='2026-09-15 00:00:00.000', invocations=6),
+        _memory_row(bin_label='2026-09-15 00:10:00.000', invocations=6),
+    ]
+    summary = summarize_memory(rows, memory_size_mb=384)
+    assert summary is not None
+    assert summary.total_invocations == 18
+    assert [one_bin.label for one_bin in summary.bins] == [
+        '00:00', '00:10', '00:20',
+    ]
+
+
+def test_summarize_memory_flags_partial_day() -> None:
+    rows = [_memory_row(bin_label='2026-09-15 16:00:00.000')]
+    summary = summarize_memory(rows, memory_size_mb=384)
+    assert summary is not None
+    assert summary.covered_minutes == 10

@@ -1,3 +1,4 @@
+# pylint: disable=too-many-lines
 """Daily visibility into the live collector's S3 output.
 
 Run locally, read-only, against the live bucket, from the repo root::
@@ -8,6 +9,10 @@ Not deployed, and never imported from ``src/``. Summarises one UTC
 ``dt=`` partition of ``curated/collector_run`` audit records: poll
 counts, failures, timing, payload sizes, and per-minute coverage
 gaps in the raw ``vehiclepos`` feed.
+
+Pass ``--memory`` to also report the Lambda's memory and duration
+envelope for that day, sourced from CloudWatch Logs Insights
+rather than the S3 audit trail.
 """
 
 import argparse
@@ -15,6 +20,7 @@ import json
 import os
 import statistics
 import sys
+import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -37,6 +43,19 @@ EXPECTED_PER_MINUTE_BY_FEED: Final[dict[str, int]] = {
     Feed.VEHICLE_POSITIONS.value: 6,
     Feed.TRIP_UPDATES.value: 1,
 }
+COLLECTOR_FUNCTION_NAME: Final[str] = 'sydney-bus-reliability-collector'
+COLLECTOR_LOG_GROUP: Final[str] = (
+    '/aws/lambda/sydney-bus-reliability-collector'
+)
+MEMORY_BIN_MINUTES: Final[int] = 10
+MEMORY_QUERY: Final[str] = (
+    'filter @type = "REPORT"\n'
+    '| stats max(@maxMemoryUsed)/1000/1000 as maxMB, '
+    'max(@duration) as maxDurationMs, count(*) as invocations '
+    'by bin(10m)'
+)
+QUERY_POLL_INTERVAL_S: Final[float] = 1.0
+QUERY_TIMEOUT_S: Final[float] = 60.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -207,6 +226,163 @@ class CollectionSummary:  # pylint: disable=too-many-instance-attributes
     total_bytes: int
     coverage: CoverageSummary
     window: CollectionWindow | None
+
+
+@dataclass(frozen=True, slots=True)
+class MemoryBin:
+    """One 10-minute bin of Lambda memory and duration stats.
+
+    Attributes
+    ----------
+    label : str
+        The bin's start time, as ``HH:MM`` UTC.
+    max_mb : float
+        Largest ``@maxMemoryUsed`` seen in this bin, in MB.
+    max_duration_ms : float
+        Largest ``@duration`` seen in this bin, in milliseconds.
+    invocations : int
+        Number of REPORT lines seen in this bin.
+    """
+
+    label: str
+    max_mb: float
+    max_duration_ms: float
+    invocations: int
+
+
+@dataclass(frozen=True, slots=True)
+class MemoryHeadroom:
+    """How much memory ceiling is left above observed usage.
+
+    Attributes
+    ----------
+    max_used_mb : float
+        Largest ``@maxMemoryUsed`` across every bin, in MB.
+    ceiling_mb : int
+        The function's configured memory ceiling, in MB.
+    headroom_mb : float
+        `ceiling_mb` minus `max_used_mb`.
+    headroom_pct : float
+        `headroom_mb` as a percentage of `ceiling_mb`.
+    """
+
+    max_used_mb: float
+    ceiling_mb: int
+    headroom_mb: float
+    headroom_pct: float
+
+
+def _memory_headroom(
+    *, max_used_mb: float, ceiling_mb: int,
+) -> MemoryHeadroom:
+    """Compute headroom between observed usage and the ceiling.
+
+    Parameters
+    ----------
+    max_used_mb : float
+        Largest ``@maxMemoryUsed`` across every bin, in MB.
+    ceiling_mb : int
+        The function's configured memory ceiling, in MB.
+
+    Returns
+    -------
+    MemoryHeadroom
+        The observed usage alongside its headroom.
+    """
+    headroom_mb = ceiling_mb - max_used_mb
+    return MemoryHeadroom(
+        max_used_mb=max_used_mb,
+        ceiling_mb=ceiling_mb,
+        headroom_mb=headroom_mb,
+        headroom_pct=headroom_mb / ceiling_mb * 100,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class MemorySummary:
+    """The collector Lambda's memory and duration envelope.
+
+    Attributes
+    ----------
+    bins : list[MemoryBin]
+        Per-bin breakdown, ordered by `label`.
+    headroom : MemoryHeadroom
+        Observed peak usage versus the configured ceiling.
+    total_invocations : int
+        Sum of `invocations` across every bin.
+    max_duration_ms : float
+        Largest ``@duration`` across every bin, in milliseconds.
+    covered_minutes : int
+        Minutes of bins actually observed. Bins with no REPORT
+        lines never appear in the query results, so this is a
+        lower bound on the true collection window, not a precise
+        span — enough to flag a partial day.
+    """
+
+    bins: list[MemoryBin]
+    headroom: MemoryHeadroom
+    total_invocations: int
+    max_duration_ms: float
+    covered_minutes: int
+
+
+def _memory_bins(rows: list[dict[str, str]]) -> list[MemoryBin]:
+    """Parse raw Logs Insights rows into sorted memory bins.
+
+    Parameters
+    ----------
+    rows : list[dict[str, str]]
+        One dict per result row, built from the ``field``/``value``
+        pairs returned by ``get_query_results``.
+
+    Returns
+    -------
+    list[MemoryBin]
+        One bin per row, ordered by `MemoryBin.label`.
+    """
+    bins = [
+        MemoryBin(
+            label=row['bin(10m)'][11:16],
+            max_mb=float(row['maxMB']),
+            max_duration_ms=float(row['maxDurationMs']),
+            invocations=int(row['invocations']),
+        )
+        for row in rows
+    ]
+    return sorted(bins, key=lambda one_bin: one_bin.label)
+
+
+def summarize_memory(
+    rows: list[dict[str, str]], *, memory_size_mb: int,
+) -> MemorySummary | None:
+    """Summarise Logs Insights memory rows. Pure, no I/O.
+
+    Parameters
+    ----------
+    rows : list[dict[str, str]]
+        Raw result rows from the memory query, one dict per row.
+    memory_size_mb : int
+        The function's configured memory ceiling, in MB.
+
+    Returns
+    -------
+    MemorySummary | None
+        The full memory envelope, or None if `rows` is empty.
+    """
+    if not rows:
+        return None
+    bins = _memory_bins(rows)
+    max_used_mb = max(one_bin.max_mb for one_bin in bins)
+    headroom = _memory_headroom(
+        max_used_mb=max_used_mb, ceiling_mb=memory_size_mb,
+    )
+    return MemorySummary(
+        bins=bins,
+        headroom=headroom,
+        total_invocations=sum(one_bin.invocations for one_bin in bins),
+        max_duration_ms=max(one_bin.max_duration_ms for one_bin in bins),
+        covered_minutes=len(bins) * MEMORY_BIN_MINUTES,
+    )
 
 
 def _feed_counts(
@@ -552,6 +728,122 @@ class CollectionRunRepository:
         return [row for rows in results for row in rows]
 
 
+class CloudWatchMemoryRepository:
+    """Reads the collector's memory envelope from CloudWatch.
+
+    Parameters
+    ----------
+    session : boto3.Session | None
+        Optional boto3 session. Defaults to a new session using
+        the standard credential chain (respects ``AWS_PROFILE``).
+    """
+
+    def __init__(self, *, session: boto3.Session | None = None) -> None:
+        session = session or boto3.Session()
+        self.logs = session.client('logs')
+        self.lambda_client = session.client('lambda')
+
+    def memory_size_mb(self, *, function_name: str) -> int:
+        """Read the function's configured memory ceiling.
+
+        Parameters
+        ----------
+        function_name : str
+            Name of the deployed Lambda function.
+
+        Returns
+        -------
+        int
+            Configured memory size, in MB.
+        """
+        config = self.lambda_client.get_function_configuration(
+            FunctionName=function_name,
+        )
+        return int(config['MemorySize'])
+
+    def query_memory_rows(
+        self, *, log_group: str, start: datetime, end: datetime,
+    ) -> list[dict[str, str]]:
+        """Run the memory-envelope query and return its rows.
+
+        Parameters
+        ----------
+        log_group : str
+            CloudWatch Logs group to query.
+        start : datetime
+            Start of the query window, UTC.
+        end : datetime
+            End of the query window, UTC.
+
+        Returns
+        -------
+        list[dict[str, str]]
+            One dict per result row, keyed by field name.
+        """
+        query_id = self.logs.start_query(
+            logGroupName=log_group,
+            startTime=int(start.timestamp()),
+            endTime=int(end.timestamp()),
+            queryString=MEMORY_QUERY,
+        )['queryId']
+        return self._poll_results(query_id=query_id)
+
+    def _poll_results(self, *, query_id: str) -> list[dict[str, str]]:
+        """Poll ``get_query_results`` until the query settles.
+
+        Parameters
+        ----------
+        query_id : str
+            Query id returned by ``start_query``.
+
+        Returns
+        -------
+        list[dict[str, str]]
+            One dict per result row, keyed by field name.
+
+        Raises
+        ------
+        RuntimeError
+            If the query fails, is cancelled, or times out
+            server-side.
+        TimeoutError
+            If the query has not settled within `QUERY_TIMEOUT_S`.
+        """
+        deadline = time.monotonic() + QUERY_TIMEOUT_S
+        while time.monotonic() < deadline:
+            response = self.logs.get_query_results(queryId=query_id)
+            status = response['status']
+            if status == 'Complete':
+                return [
+                    {field['field']: field['value'] for field in row}
+                    for row in response['results']
+                ]
+            if status in ('Failed', 'Cancelled', 'Timeout'):
+                raise RuntimeError(f'query {status.lower()}: {query_id}')
+            time.sleep(QUERY_POLL_INTERVAL_S)
+        raise TimeoutError(f'query did not complete: {query_id}')
+
+
+def _memory_window(*, date: str) -> tuple[datetime, datetime]:
+    """Compute the UTC query window for one day's memory report.
+
+    Parameters
+    ----------
+    date : str
+        The day, as ``YYYY-MM-DD``.
+
+    Returns
+    -------
+    tuple[datetime, datetime]
+        Start and end of the window, UTC. The end is capped at
+        now, so a partial in-progress day is not queried past
+        its actual data.
+    """
+    start = datetime.strptime(date, '%Y-%m-%d').replace(tzinfo=UTC)
+    end = min(start + timedelta(days=1), datetime.now(UTC))
+    return start, end
+
+
 def _fmt_duration(*, minutes: int) -> str:
     """Format a minute count as ``HhMMm``.
 
@@ -758,6 +1050,83 @@ def _print_coverage(summary: CollectionSummary) -> None:
         print(f'  ... and {remaining:,} more short minutes')
 
 
+def _fmt_memory_bin(one_bin: MemoryBin) -> str:
+    """Format one memory bin as a single output line.
+
+    Parameters
+    ----------
+    one_bin : MemoryBin
+        The bin to format.
+
+    Returns
+    -------
+    str
+        A human-readable summary of `one_bin`.
+    """
+    return (
+        f'  {one_bin.label}: {one_bin.max_mb:.0f} MB max, '
+        f'{one_bin.max_duration_ms:.0f} ms max, '
+        f'{one_bin.invocations} inv'
+    )
+
+
+def _print_memory_summary(summary: MemorySummary) -> None:
+    """Print max usage, headroom, duration, and invocation count.
+
+    Parameters
+    ----------
+    summary : MemorySummary
+        The memory report to print from.
+    """
+    headroom = summary.headroom
+    print(
+        f'max memory used: {headroom.max_used_mb:.0f} MB / '
+        f'{headroom.ceiling_mb} MB configured'
+    )
+    print(
+        f'headroom: {headroom.headroom_mb:.0f} MB '
+        f'({headroom.headroom_pct:.1f}% of ceiling)'
+    )
+    print(f'max duration: {summary.max_duration_ms:.0f} ms')
+    print(f'invocations observed: {summary.total_invocations:,}')
+
+
+def _print_memory_bins(summary: MemorySummary) -> None:
+    """Print the per-bin memory and duration breakdown.
+
+    Parameters
+    ----------
+    summary : MemorySummary
+        The memory report to print from.
+    """
+    print(f'per-bin breakdown ({MEMORY_BIN_MINUTES}m bins):')
+    for one_bin in summary.bins:
+        print(_fmt_memory_bin(one_bin))
+
+
+def print_memory_report(
+    summary: MemorySummary | None, *, date: str,
+) -> None:
+    """Print the full memory-envelope report.
+
+    Parameters
+    ----------
+    summary : MemorySummary | None
+        The memory report, or None if no REPORT lines were found.
+    date : str
+        The UTC day the report covers, as ``YYYY-MM-DD``.
+    """
+    print(f'\n== Memory envelope (dt={date}, CloudWatch Logs) ==')
+    if summary is None:
+        print('no REPORT log lines found for this window')
+        return
+    if summary.covered_minutes < MINUTES_PER_DAY:
+        covered = _fmt_duration(minutes=summary.covered_minutes)
+        print(f'partial day: bins cover at least {covered} of 24h')
+    _print_memory_summary(summary)
+    _print_memory_bins(summary)
+
+
 def print_report(summary: CollectionSummary, *, date: str) -> None:
     """Print the full human-readable report.
 
@@ -801,6 +1170,11 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         '--profile',
         default=None,
         help='AWS named profile; defaults to AWS_PROFILE/the chain',
+    )
+    parser.add_argument(
+        '--memory',
+        action='store_true',
+        help='also report the Lambda memory/duration envelope',
     )
     return parser.parse_args(argv)
 
@@ -924,6 +1298,36 @@ def _fetch_summary(
     return summarize_day(rows)
 
 
+def _fetch_memory_summary(
+    *, args: argparse.Namespace, date: str,
+) -> MemorySummary | None:
+    """Query CloudWatch and summarise the memory envelope.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+        Parsed command-line arguments.
+    date : str
+        The day to query, as ``YYYY-MM-DD`` UTC.
+
+    Returns
+    -------
+    MemorySummary | None
+        The summarised memory envelope, or None if no REPORT
+        lines were found.
+    """
+    session = _session_for(profile=args.profile)
+    repo = CloudWatchMemoryRepository(session=session)
+    memory_size_mb = repo.memory_size_mb(
+        function_name=COLLECTOR_FUNCTION_NAME,
+    )
+    start, end = _memory_window(date=date)
+    rows = repo.query_memory_rows(
+        log_group=COLLECTOR_LOG_GROUP, start=start, end=end,
+    )
+    return summarize_memory(rows, memory_size_mb=memory_size_mb)
+
+
 def main(argv: list[str] | None = None) -> int:
     """Fetch, summarise, and print one day's collection report.
 
@@ -941,6 +1345,9 @@ def main(argv: list[str] | None = None) -> int:
     date = args.date or datetime.now(UTC).strftime('%Y-%m-%d')
     summary = _fetch_summary(args=args, date=date)
     print_report(summary, date=date)
+    if args.memory:
+        memory_summary = _fetch_memory_summary(args=args, date=date)
+        print_memory_report(memory_summary, date=date)
     return 0
 
 
