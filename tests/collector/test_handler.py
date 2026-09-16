@@ -12,6 +12,7 @@ import responses
 from aws_lambda_powertools.utilities import parameters
 from botocore.exceptions import ClientError, EndpointConnectionError
 
+from src.collector import handler as handler_module
 from src.collector.handler import (
     PollContext,
     ScheduleError,
@@ -122,6 +123,23 @@ class _AlwaysUnexpectedRepository(RawFeedRepository):
 
     def put_raw(self, *, result):
         raise ValueError('unexpected storage failure')
+
+
+class _RecordingSession(requests.Session):
+    """A ``Session`` that records whether ``close`` was called.
+
+    Standing in for ``requests.Session`` so a test can observe
+    whether ``collect`` released the session it created, on both
+    the normal and the exception exit path.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+        super().close()
 
 
 class _Context:
@@ -640,3 +658,69 @@ def test_payloads_are_stored_before_the_last_poll_fires(
 
     assert len(put_times) == len(TIMING_SCHEDULE)
     assert min(put_times) < max(fire_times)
+
+
+@responses.activate
+def test_collect_closes_its_session_on_success(
+    _bucket: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Session ``collect`` creates is closed once it returns.
+
+    An unclosed per-invocation ``requests.Session`` leaks its
+    pooled connections on every warm Lambda invocation. ``collect``
+    must release the one it creates itself.
+    """
+    responses.add(responses.GET, VEHICLE_URL, body=b'vp', status=200)
+    responses.add(responses.GET, TRIP_URL, body=b'tu', status=200)
+    created: list[_RecordingSession] = []
+
+    def factory() -> _RecordingSession:
+        session = _RecordingSession()
+        created.append(session)
+        return session
+
+    monkeypatch.setattr(handler_module.requests, 'Session', factory)
+
+    collect(
+        schedule=FAST_SCHEDULE,
+        api_key='k',
+        repository=RawFeedRepository(bucket=_bucket),
+        invocation_id='req-1',
+    )
+
+    assert len(created) == 1
+    assert created[0].closed is True
+
+
+@responses.activate
+def test_collect_closes_its_session_on_worker_crash(
+    _bucket: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Session is closed even when a worker crashes.
+
+    A crashing invocation must not leak its Session either — a
+    crash is exactly when memory pressure is highest.
+    """
+    responses.add(responses.GET, VEHICLE_URL, body=b'vp', status=200)
+    responses.add(responses.GET, TRIP_URL, body=b'tu', status=200)
+    created: list[_RecordingSession] = []
+
+    def factory() -> _RecordingSession:
+        session = _RecordingSession()
+        created.append(session)
+        return session
+
+    monkeypatch.setattr(handler_module.requests, 'Session', factory)
+
+    with pytest.raises(ScheduleError):
+        collect(
+            schedule=FAST_SCHEDULE,
+            api_key='k',
+            repository=_AlwaysUnexpectedRepository(bucket=_bucket),
+            invocation_id='req-1',
+        )
+
+    assert len(created) == 1
+    assert created[0].closed is True

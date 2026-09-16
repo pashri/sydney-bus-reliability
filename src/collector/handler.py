@@ -585,27 +585,30 @@ def collect(
         still fails loudly (the error alarm fires) without losing
         the audit trail for its siblings.
     """
-    context = PollContext(
-        api_key=api_key,
-        session=requests.Session(),
-        semaphore=threading.Semaphore(MAX_CONCURRENT_POLLS),
-        repository=repository,
-    )
     outcomes: list[PollOutcome] = []
     crashed = False
-    try:
-        outcomes = run_schedule(schedule=schedule, context=context)
-    except ScheduleError as error:
-        outcomes = error.outcomes
-        crashed = True
-        raise
-    finally:
-        counts = record_run(
-            results=outcomes,
+    with requests.Session() as session:
+        context = PollContext(
+            api_key=api_key,
+            session=session,
+            semaphore=threading.Semaphore(MAX_CONCURRENT_POLLS),
             repository=repository,
-            invocation_id=invocation_id,
-            crashed=crashed,
         )
+        try:
+            outcomes = run_schedule(
+                schedule=schedule, context=context,
+            )
+        except ScheduleError as error:
+            outcomes = error.outcomes
+            crashed = True
+            raise
+        finally:
+            counts = record_run(
+                results=outcomes,
+                repository=repository,
+                invocation_id=invocation_id,
+                crashed=crashed,
+            )
     return counts
 
 
