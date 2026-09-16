@@ -1,0 +1,13 @@
+# Ignore every dot-directory, then whitelist the ones that belong in the repo.
+.*/
+!.github/
+
+# Dot-files are not covered by the rule above.
+.coverage
+
+__pycache__/
+*.pyc
+samconfig.local.toml
+requirements.txt
+*.pb
+*.zip

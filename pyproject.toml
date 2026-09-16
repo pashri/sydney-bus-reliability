@@ -1,0 +1,35 @@
+[project]
+name = "sydney-bus-reliability"
+version = "0.1.0"
+requires-python = ">=3.14"
+dependencies = [
+    "requests>=2.32",
+    "aws-lambda-powertools>=3.0",
+    "boto3>=1.35",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-cov>=6.0",
+    "moto[s3]>=5.0",
+    "responses>=0.25",
+    "mypy>=1.13",
+    "pylint>=3.3",
+    "isort>=5.13",
+    "types-requests",
+    "gtfs-realtime-bindings>=1.0",
+]
+
+[tool.isort]
+multi_line_output = 3
+include_trailing_comma = true
+line_length = 79
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--cov=src --cov-report=term-missing"
+
+[tool.mypy]
+python_version = "3.14"
+strict = true
