@@ -29,7 +29,7 @@ from typing import Any, Final
 import requests
 from aws_lambda_powertools import Logger
 from aws_lambda_powertools.utilities import parameters
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 
 from src.common.feeds import fetch_feed
 from src.common.storage import RawFeedRepository, run_record
@@ -171,11 +171,15 @@ def store_one(
         The key written (or None if the body was empty), and whether
         storing it failed. A storage failure is logged and reported,
         never raised, so one poll's S3 error cannot abort storage of
-        the other polls or the run record.
+        the other polls or the run record. ``BotoCoreError`` covers
+        the transient network family (endpoint, connect and read
+        timeouts, closed connections); ``ClientError`` covers S3
+        rejecting the request itself. Both are contained the same
+        way.
     """
     try:
         return repository.put_raw(result=result), False
-    except ClientError:
+    except (ClientError, BotoCoreError):
         logger.exception(
             'Failed to store raw payload',
             extra={'feed': result.feed.value},
@@ -350,6 +354,65 @@ def submit_polls(
     ]
 
 
+class ScheduleError(Exception):
+    """A poll worker raised something ``store_one`` did not expect.
+
+    Carries every outcome that *did* complete, so the caller can
+    still write a run record for the siblings before letting the
+    original error surface.
+
+    Parameters
+    ----------
+    outcomes : list[PollOutcome]
+        Every poll that completed before the failure.
+    cause : BaseException
+        The exception a worker raised.
+    """
+
+    def __init__(
+        self, *, outcomes: list[PollOutcome], cause: BaseException,
+    ) -> None:
+        super().__init__(str(cause))
+        self.outcomes = outcomes
+
+
+def _gather(
+    *, futures: list[Future[PollOutcome]],
+) -> list[PollOutcome]:
+    """Collect every future's result, logging each failure.
+
+    Parameters
+    ----------
+    futures : list[Future[PollOutcome]]
+        One future per scheduled poll.
+
+    Returns
+    -------
+    list[PollOutcome]
+        One outcome per future that completed without raising.
+
+    Raises
+    ------
+    ScheduleError
+        If any future raised. Every failing future is logged, not
+        only the one whose exception is ultimately raised, so a
+        second or third failure is never discarded silently.
+    """
+    outcomes: list[PollOutcome] = []
+    first_error: BaseException | None = None
+    for future in futures:
+        try:
+            outcomes.append(future.result())
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.exception('Poll worker failed unexpectedly')
+            first_error = first_error or exc
+    if first_error is not None:
+        raise ScheduleError(
+            outcomes=outcomes, cause=first_error,
+        ) from first_error
+    return outcomes
+
+
 def run_schedule(
     *,
     schedule: list[tuple[float, Feed]],
@@ -374,6 +437,14 @@ def run_schedule(
     list[PollOutcome]
         One outcome per scheduled poll, in schedule order, each
         already stored and carrying no payload bytes.
+
+    Raises
+    ------
+    ScheduleError
+        If any worker raised something ``store_one`` did not
+        anticipate. ``fetch_feed`` never raises and ``store_one``
+        already contains ``ClientError`` and ``BotoCoreError``, so
+        this is reserved for a genuinely unenumerated failure.
     """
     started_at = time.monotonic()
     with ThreadPoolExecutor(max_workers=len(schedule)) as pool:
@@ -383,7 +454,7 @@ def run_schedule(
             context=context,
             pool=pool,
         )
-        return [future.result() for future in futures]
+        return _gather(futures=futures)
 
 
 def record_run(
@@ -457,6 +528,15 @@ def collect(
     CollectionCounts
         Counts of fetches attempted, payloads stored and fetches or
         stores failed.
+
+    Raises
+    ------
+    ScheduleError
+        If a poll worker raised something unanticipated. The run
+        record for every poll that did complete is written in a
+        ``finally`` block before this propagates, so the invocation
+        still fails loudly (the error alarm fires) without losing
+        the audit trail for its siblings.
     """
     context = PollContext(
         api_key=api_key,
@@ -464,12 +544,19 @@ def collect(
         semaphore=threading.Semaphore(MAX_CONCURRENT_POLLS),
         repository=repository,
     )
-    outcomes = run_schedule(schedule=schedule, context=context)
-    return record_run(
-        results=outcomes,
-        repository=repository,
-        invocation_id=invocation_id,
-    )
+    outcomes: list[PollOutcome] = []
+    try:
+        outcomes = run_schedule(schedule=schedule, context=context)
+    except ScheduleError as error:
+        outcomes = error.outcomes
+        raise
+    finally:
+        counts = record_run(
+            results=outcomes,
+            repository=repository,
+            invocation_id=invocation_id,
+        )
+    return counts
 
 
 @logger.inject_lambda_context

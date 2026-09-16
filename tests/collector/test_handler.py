@@ -1,6 +1,7 @@
 """Tests for the collector Lambda handler."""
 
 import dataclasses
+import json
 import threading
 import time
 
@@ -9,10 +10,11 @@ import pytest
 import requests
 import responses
 from aws_lambda_powertools.utilities import parameters
-from botocore.exceptions import ClientError
+from botocore.exceptions import ClientError, EndpointConnectionError
 
 from src.collector.handler import (
     PollContext,
+    ScheduleError,
     collect,
     handler,
     poll_schedule,
@@ -75,6 +77,39 @@ class _AlwaysFailingRepository(RawFeedRepository):
             {'Error': {'Code': 'InternalError', 'Message': 'x'}},
             'PutObject',
         )
+
+
+class _FlakyBotoCoreRepository(RawFeedRepository):
+    """A repository whose first ``put_raw`` raises a network error."""
+
+    def __init__(self, *, bucket: str) -> None:
+        super().__init__(bucket=bucket)
+        self.raise_next = True
+
+    def put_raw(self, *, result):
+        if self.raise_next:
+            self.raise_next = False
+            raise EndpointConnectionError(endpoint_url='https://s3')
+        return super().put_raw(result=result)
+
+
+class _FlakyUnexpectedRepository(RawFeedRepository):
+    """A repository whose first ``put_raw`` raises unexpectedly.
+
+    Stands in for a bug or an error type nobody enumerated: it must
+    still leave the run record intact for the siblings that
+    succeeded.
+    """
+
+    def __init__(self, *, bucket: str) -> None:
+        super().__init__(bucket=bucket)
+        self.raise_next = True
+
+    def put_raw(self, *, result):
+        if self.raise_next:
+            self.raise_next = False
+            raise ValueError('unexpected storage failure')
+        return super().put_raw(result=result)
 
 
 class _Context:
@@ -319,7 +354,80 @@ def test_at_most_two_requests_in_flight(_bucket: str) -> None:
 
 
 @responses.activate
-def test_store_all_survives_one_storage_failure(_bucket: str) -> None:
+def test_store_one_contains_a_botocore_connection_error(
+    _bucket: str,
+) -> None:
+    """A BotoCoreError subclass is contained like ClientError.
+
+    S3 raises ``EndpointConnectionError`` (a ``BotoCoreError``, not
+    a ``ClientError``) on a transient network blip. It must be
+    logged and reported the same way: sibling polls still store,
+    the run record is still written, and the failed poll's own
+    record shows the storage-failure marker rather than a fetch
+    failure.
+    """
+    responses.add(responses.GET, VEHICLE_URL, body=b'vp', status=200)
+    responses.add(responses.GET, TRIP_URL, body=b'tu', status=200)
+
+    result = collect(
+        schedule=FAST_SCHEDULE,
+        api_key='k',
+        repository=_FlakyBotoCoreRepository(bucket=_bucket),
+        invocation_id='req-1',
+    )
+
+    assert result['fetched'] == 3
+    assert result['stored'] == 2
+    assert result['failed'] == 1
+
+    client = boto3.client('s3', region_name=REGION)
+    listing = client.list_objects_v2(
+        Bucket=_bucket, Prefix='curated/collector_run/',
+    )
+    assert listing['KeyCount'] == 1
+    body = client.get_object(
+        Bucket=_bucket, Key=listing['Contents'][0]['Key'],
+    )['Body'].read()
+    records = [
+        json.loads(line) for line in body.decode().splitlines()
+    ]
+    failed = [r for r in records if r['error'] is not None]
+    assert len(failed) == 1
+    assert failed[0]['error'] == 'storage failed'
+    assert failed[0]['status_code'] == 200
+
+
+@responses.activate
+def test_collect_writes_run_record_on_unexpected_worker_error(
+    _bucket: str,
+) -> None:
+    """An unexpected worker exception still results in a run record.
+
+    Two exception classes are enumerated (``ClientError`` and
+    ``BotoCoreError``); anything else must not be able to skip the
+    run record. The invocation still fails so the error alarm
+    fires, but the audit record for the siblings is written first.
+    """
+    responses.add(responses.GET, VEHICLE_URL, body=b'vp', status=200)
+    responses.add(responses.GET, TRIP_URL, body=b'tu', status=200)
+
+    with pytest.raises(ScheduleError):
+        collect(
+            schedule=FAST_SCHEDULE,
+            api_key='k',
+            repository=_FlakyUnexpectedRepository(bucket=_bucket),
+            invocation_id='req-1',
+        )
+
+    client = boto3.client('s3', region_name=REGION)
+    listing = client.list_objects_v2(
+        Bucket=_bucket, Prefix='curated/collector_run/',
+    )
+    assert listing['KeyCount'] == 1
+
+
+@responses.activate
+def test_collect_survives_one_storage_failure(_bucket: str) -> None:
     responses.add(responses.GET, VEHICLE_URL, body=b'vp', status=200)
     responses.add(responses.GET, TRIP_URL, body=b'tu', status=200)
 
@@ -341,7 +449,7 @@ def test_store_all_survives_one_storage_failure(_bucket: str) -> None:
 
 
 @responses.activate
-def test_store_all_writes_run_record_when_every_store_fails(
+def test_collect_writes_run_record_when_every_store_fails(
     _bucket: str,
 ) -> None:
     responses.add(responses.GET, VEHICLE_URL, body=b'vp', status=200)
