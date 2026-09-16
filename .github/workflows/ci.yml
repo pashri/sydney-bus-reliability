@@ -15,10 +15,16 @@ jobs:
           python-version: '3.14'
       - run: uv sync --frozen
       - run: uv run pytest tests/
-      - run: uv run mypy src/
-      - run: uv run isort --check-only src/ tests/
-      - run: uv run pylint src/
-      - run: uv run numpydoc lint $(find src -name "*.py")
+      - run: uv run mypy src/ scripts/
+      - run: uv run isort --check-only src/ tests/ scripts/
+      - run: uv run pylint src/ scripts/
+      # Guard the glob: numpydoc exits 0 given no files, which would
+      # silently retire the check.
+      - run: |
+          test "$(find src scripts -name '*.py' | wc -l)" -gt 0 \
+            || { echo 'no python files found'; exit 1; }
+          find src scripts -name '*.py' -print0 \
+            | xargs -0 uv run numpydoc lint
 
   template:
     runs-on: ubuntu-latest
