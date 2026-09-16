@@ -75,14 +75,13 @@ Resources:
       Description: >-
         One invocation per minute: 6 vehicle-position polls at
         t+0..50s plus 1 trip-updates poll at t+0, each anchored
-        to an absolute offset, written to S3 as gzipped
-        protobuf. 256 MB is cost-critical — 512 MB roughly
-        triples the bill.
+        to an absolute offset, written to S3 as gzipped protobuf.
       FunctionName: sydney-bus-reliability-collector
       CodeUri: .
       Handler: src.collector.handler.handler
       MemorySize: 256  # 512 MB roughly triples the bill
       Timeout: 120 # Last poll starts at t+50s; this gives a bit of legroom.
+      # No ReservedConcurrentExecutions: account quota of 10 forbids it.
       Environment:
         Variables:
           BUCKET_NAME: !Ref DataBucket
