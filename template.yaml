@@ -3,30 +3,28 @@ Transform: AWS::Serverless-2016-10-31
 Description: Sydney bus GTFS-Realtime collector
 
 Parameters:
-  # Alarm and budget-overrun notifications both go here.
   AlertEmail:
+    Description: >-
+      Address for collector alarm and budget-overrun notifications
     Type: String
-    Description: Address for collector alarms
-  # SSM parameter holding the TfNSW API key; named so it can be
-  # rotated without a template change.
   ApiKeyParameterName:
+    Description: Name of the SSM SecureString holding the TfNSW API key
     Type: String
     Default: /sydney-bus-reliability/tfnsw-api-key
 
 Globals:
   Function:
-    # arm64 (Graviton) is cheaper per GB-s and every dependency here
-    # is pure Python, so nothing needs compiling for it.
     Runtime: python3.14
-    Architectures: [arm64]
+    Architectures: [arm64]  # cheaper per GB-s; deps are pure Python
 
 Resources:
-  # DeletionPolicy: Retain because collected bus data is
-  # irreplaceable — TfNSW publishes no historical feed, so a week
-  # not collected is gone forever.
   DataBucket:
+    Metadata:
+      Description: >-
+        Raw gzipped GTFS-Realtime snapshots under raw/, and
+        per-invocation audit records under curated/collector_run/.
     Type: AWS::S3::Bucket
-    DeletionPolicy: Retain
+    DeletionPolicy: Retain  # no historical feed; data is irreplaceable
     UpdateReplacePolicy: Retain
     Properties:
       BucketName: !Sub 'sydney-bus-reliability-${AWS::AccountId}'
@@ -41,34 +39,30 @@ Resources:
               SSEAlgorithm: AES256
       LifecycleConfiguration:
         Rules:
-          # 30 days, deliberately not 7: until the Phase 2 compactor
-          # exists, raw/ is the only durable copy of anything, so a
-          # short expiry would silently delete the first week if
-          # Phase 2 slipped. Tighten to 7 once curated/ is durable.
           - Id: ExpireRaw
             Status: Enabled
             Prefix: raw/
-            ExpirationInDays: 30
+            ExpirationInDays: 30  # we'll change to 7 after compactor is made
 
-  # Collection runs unattended, including through an international
-  # relocation, so an alarm nobody receives is worthless.
   AlertTopic:
+    Metadata:
+      Description: Fan-out point for collector alarm notifications.
     Type: AWS::SNS::Topic
     Properties:
       TopicName: sydney-bus-reliability-alerts
 
-  # Requires a manual confirmation click before anything can be
-  # delivered to AlertEmail.
   AlertSubscription:
+    Metadata:
+      Description: Email subscription delivering alerts to AlertEmail.
     Type: AWS::SNS::Subscription
     Properties:
       Protocol: email
-      Endpoint: !Ref AlertEmail
+      Endpoint: !Ref AlertEmail  # requires a manual confirmation click
       TopicArn: !Ref AlertTopic
 
-  # Declared explicitly so retention is bounded at 30 days rather
-  # than Lambda's implicit never-expiring default.
   CollectorLogGroup:
+    Metadata:
+      Description: Log group for the collector function, retained 30 days.
     Type: AWS::Logs::LogGroup
     Properties:
       LogGroupName: /aws/lambda/sydney-bus-reliability-collector
@@ -78,38 +72,21 @@ Resources:
     Type: AWS::Serverless::Function
     DependsOn: CollectorLogGroup
     Properties:
+      Description: >-
+        One invocation per minute: 6 vehicle-position polls at
+        t+0..50s plus 1 trip-updates poll at t+0, each anchored
+        to an absolute offset, written to S3 as gzipped
+        protobuf. 256 MB is cost-critical — 512 MB roughly
+        triples the bill.
       FunctionName: sydney-bus-reliability-collector
       CodeUri: .
       Handler: src.collector.handler.handler
-      # 256 MB is cost-critical, not a guess: 512 MB roughly triples
-      # the monthly bill by burning the free 400,000 GB-s allowance
-      # twice as fast.
-      MemorySize: 256
-      # The last scheduled poll starts at t+50s and needs its HTTP
-      # round trip plus S3 write, so duration is structurally ~51s+;
-      # the 3s platform default would break everything. A timeout
-      # under the 60s schedule interval means invocations overlap by
-      # design in steady state, not just on retries — object keys use
-      # actual fetch time, not an intended slot, because of this.
-      # The spec's floor is 65s. Set well above it because observed
-      # duration reached 55s before the morning peak and was still
-      # climbing: raising this costs nothing (Lambda bills actual
-      # duration, not the configured ceiling), while hitting it would
-      # kill the invocation and lose that minute permanently.
-      Timeout: 120
-      # No ReservedConcurrentExecutions. It would cap a runaway retry
-      # storm while still permitting the intended overlap above, but a
-      # new account's concurrency quota is 10, and AWS refuses any
-      # reservation that leaves fewer than 10 unreserved — so at this
-      # quota no reservation is possible at all. Runaway cost is still
-      # bounded by that same account quota of 10 and by the $25 budget
-      # alarm below. Reinstate this once the quota is raised.
+      MemorySize: 256  # 512 MB roughly triples the bill
+      Timeout: 120 # Last poll starts at t+50s; this gives a bit of legroom.
       Environment:
         Variables:
           BUCKET_NAME: !Ref DataBucket
-          # The poll cadence lives here and ONLY here; the handler
-          # reads it with no in-code default and raises without it.
-          VEHICLE_OFFSETS_S: '0,10,20,30,40,50'
+          VEHICLE_OFFSETS_S: '0,10,20,30,40,50'  # cadence lives here only
           API_KEY_PARAMETER_NAME: !Ref ApiKeyParameterName
           POWERTOOLS_SERVICE_NAME: collector
           POWERTOOLS_LOG_LEVEL: INFO
@@ -124,15 +101,11 @@ Resources:
           Properties:
             Schedule: rate(1 minute)
 
-  # TreatMissingData: breaching is the important part below — if the
-  # function stops being invoked there is no metric data at all, and
-  # absent data must read as broken rather than healthy. This is the
-  # alarm that catches total failure.
   CollectorSilentAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmName: collector-not-running
       AlarmDescription: No collector invocations in 15 minutes
+      AlarmName: collector-not-running
       Namespace: AWS/Lambda
       MetricName: Invocations
       Dimensions:
@@ -143,16 +116,16 @@ Resources:
       EvaluationPeriods: 1
       Threshold: 1
       ComparisonOperator: LessThanThreshold
-      TreatMissingData: breaching
+      TreatMissingData: breaching  # no invocations = no data = broken
       AlarmActions: [!Ref AlertTopic]
 
-  # Catches a collector that runs but fails, which the silent alarm
-  # above cannot see.
+  # Catches a collector that runs but fails, which the silent
+  # alarm above cannot see.
   CollectorErrorAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmName: collector-erroring
       AlarmDescription: Collector invocation errors
+      AlarmName: collector-erroring
       Namespace: AWS/Lambda
       MetricName: Errors
       Dimensions:
@@ -166,10 +139,10 @@ Resources:
       TreatMissingData: notBreaching
       AlarmActions: [!Ref AlertTopic]
 
-  # $25, not $15: steady state is ~$10, growing ~$0.80/month as
-  # curated parquet accumulates, so $15 would start firing routinely
-  # within months. $25 still catches a runaway loop within days.
   MonthlyBudget:
+    Metadata:
+      Description: >-
+        Monthly cost budget with an alert at 80% of the $25 limit.
     Type: AWS::Budgets::Budget
     Properties:
       Budget:
