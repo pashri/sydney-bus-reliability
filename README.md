@@ -2,8 +2,9 @@
 
 [![CI](https://github.com/pashri/sydney-bus-reliability/actions/workflows/ci.yml/badge.svg)](https://github.com/pashri/sydney-bus-reliability/actions/workflows/ci.yml)
 
-Collects Transport for NSW GTFS-Realtime bus feeds and measures how
-reliable Sydney's buses are.
+Collects Transport for NSW GTFS-Realtime bus feeds, working towards
+measuring how reliable Sydney's buses are. Currently Phase 1: collection
+only — no compaction, schedule loading, analysis or marts yet.
 
 Contains public sector information licensed under the Creative Commons
 Attribution 4.0 licence. Data source: Transport for NSW.
