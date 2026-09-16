@@ -18,6 +18,8 @@ Globals:
 Resources:
   DataBucket:
     Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       BucketName: !Sub 'sydney-bus-reliability-${AWS::AccountId}'
       PublicAccessBlockConfiguration:
