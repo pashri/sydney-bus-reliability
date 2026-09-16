@@ -31,3 +31,18 @@ Attribution 4.0 licence. Data source: Transport for NSW.
 ## Test
 
     uv run pytest
+
+## Operational scripts
+
+Local, read-only tools under `scripts/`, run from the repo root as
+modules so they can import `src/`:
+
+    uv run python -m scripts.check_collection --date 2026-09-15
+    uv run python -m scripts.verify_feeds
+
+`check_collection.py` reports one UTC day's collector health from
+the live bucket. It resolves the bucket from `--bucket`, then
+`BUCKET_NAME`, then a lookup of the deployed stack's `BucketName`
+output (`--stack-name`, default `sydney-bus-reliability`). AWS
+credentials come from `--profile` if given, else the standard
+credential chain (e.g. `AWS_PROFILE`).

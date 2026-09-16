@@ -24,11 +24,11 @@ def measure(*, name: str, url: str, api_key: str) -> None:
 
     Parameters
     ----------
-    name
+    name : str
         Short feed name, used only for display.
-    url
+    url : str
         Fully qualified feed URL.
-    api_key
+    api_key : str
         TfNSW Open Data Hub API key.
     """
     response = requests.get(
@@ -37,7 +37,7 @@ def measure(*, name: str, url: str, api_key: str) -> None:
         timeout=TIMEOUT,
     )
     response.raise_for_status()
-    feed = gtfs_realtime_pb2.FeedMessage()
+    feed = gtfs_realtime_pb2.FeedMessage()  # pylint: disable=no-member
     feed.ParseFromString(response.content)
     print(
         f'{name}: {response.status_code} '
