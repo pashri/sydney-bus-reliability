@@ -24,6 +24,7 @@ import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from typing import Any, Final
 
 import requests
@@ -374,6 +375,7 @@ class ScheduleError(Exception):
     ) -> None:
         super().__init__(str(cause))
         self.outcomes = outcomes
+        self.cause = cause
 
 
 def _gather(
@@ -396,7 +398,11 @@ def _gather(
     ScheduleError
         If any future raised. Every failing future is logged, not
         only the one whose exception is ultimately raised, so a
-        second or third failure is never discarded silently.
+        second or third failure is never discarded silently. The
+        exception is stripped of its traceback before it is kept,
+        since that traceback's frames (``poll_and_store``'s local
+        ``result``) would otherwise hold the fetched body alive for
+        the rest of the invocation.
     """
     outcomes: list[PollOutcome] = []
     first_error: BaseException | None = None
@@ -405,7 +411,9 @@ def _gather(
             outcomes.append(future.result())
         except Exception as exc:  # pylint: disable=broad-except
             logger.exception('Poll worker failed unexpectedly')
-            first_error = first_error or exc
+            exc.with_traceback(None)
+            if first_error is None:
+                first_error = exc
     if first_error is not None:
         raise ScheduleError(
             outcomes=outcomes, cause=first_error,
@@ -457,27 +465,65 @@ def run_schedule(
         return _gather(futures=futures)
 
 
+def _crash_record() -> RunRecord:
+    """Build a placeholder record for a total, correlated failure.
+
+    Used only when every worker crashed before handing back a
+    ``PollOutcome`` at all, so there is no real ``FetchResult`` left
+    to summarise. Without this, "no objects and no audit record" is
+    indistinguishable from "the collector was never invoked" — the
+    exact ambiguity the audit record exists to remove.
+
+    Returns
+    -------
+    RunRecord
+        A record carrying no feed data, only the fact and time of
+        the failure.
+    """
+    now = datetime.now(UTC).isoformat()
+    return RunRecord(
+        feed='none',
+        fetched_at_utc=now,
+        received_at_utc=now,
+        rtt_s=0.0,
+        server_date_utc=None,
+        skew_s=None,
+        status_code=None,
+        body_bytes=0,
+        error='every poll worker crashed unexpectedly',
+    )
+
+
 def record_run(
     *,
     results: list[PollOutcome],
     repository: RawFeedRepository,
     invocation_id: str,
+    crashed: bool = False,
 ) -> CollectionCounts:
     """Write the invocation's audit record and tally the outcomes.
 
     The payloads themselves are already stored by this point, each
     by its own poll. What remains is the one record that answers
     "was the gap TfNSW or me?", and it is written even when every
-    poll failed to fetch or to store.
+    poll failed to fetch or to store — and, via ``crashed``, even
+    when every poll worker crashed before it could report at all.
 
     Parameters
     ----------
     results : list[PollOutcome]
-        Every poll attempted, with its payload already stored.
+        Every poll that completed, with its payload already stored.
     repository : RawFeedRepository
         Destination repository.
     invocation_id : str
         Lambda request id.
+    crashed : bool
+        Whether a worker crashed with something unenumerated. An
+        empty ``results`` with ``crashed=False`` means the schedule
+        itself was empty, and nothing is written; an empty
+        ``results`` with ``crashed=True`` means every poll crashed,
+        and a placeholder record is written so the total failure
+        still leaves evidence.
 
     Returns
     -------
@@ -485,18 +531,19 @@ def record_run(
         Counts of fetches attempted, payloads stored and fetches or
         stores failed.
     """
-    if not results:
+    if not results and not crashed:
         return CollectionCounts(fetched=0, stored=0, failed=0)
+    records = [o.record for o in results] or [_crash_record()]
     repository.put_run_record(
-        records=[outcome.record for outcome in results],
-        invocation_id=invocation_id,
+        records=records, invocation_id=invocation_id,
     )
     return CollectionCounts(
         fetched=len(results),
         stored=sum(1 for o in results if o.stored),
         failed=sum(
             1 for o in results if o.record['error'] is not None
-        ),
+        )
+        + (1 if not results else 0),
     )
 
 
@@ -545,16 +592,19 @@ def collect(
         repository=repository,
     )
     outcomes: list[PollOutcome] = []
+    crashed = False
     try:
         outcomes = run_schedule(schedule=schedule, context=context)
     except ScheduleError as error:
         outcomes = error.outcomes
+        crashed = True
         raise
     finally:
         counts = record_run(
             results=outcomes,
             repository=repository,
             invocation_id=invocation_id,
+            crashed=crashed,
         )
     return counts
 

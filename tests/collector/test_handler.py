@@ -112,6 +112,18 @@ class _FlakyUnexpectedRepository(RawFeedRepository):
         return super().put_raw(result=result)
 
 
+class _AlwaysUnexpectedRepository(RawFeedRepository):
+    """A repository whose ``put_raw`` always raises unexpectedly.
+
+    Every worker crashes identically — the correlated case an
+    unenumerated bug or a new botocore base class would actually
+    produce, as opposed to one poll failing in isolation.
+    """
+
+    def put_raw(self, *, result):
+        raise ValueError('unexpected storage failure')
+
+
 class _Context:
     """Minimal stand-in for the Lambda context object."""
 
@@ -406,7 +418,9 @@ def test_collect_writes_run_record_on_unexpected_worker_error(
     Two exception classes are enumerated (``ClientError`` and
     ``BotoCoreError``); anything else must not be able to skip the
     run record. The invocation still fails so the error alarm
-    fires, but the audit record for the siblings is written first.
+    fires, but the audit record for the siblings is written first,
+    and it must hold their actual data, not merely one arbitrary
+    row.
     """
     responses.add(responses.GET, VEHICLE_URL, body=b'vp', status=200)
     responses.add(responses.GET, TRIP_URL, body=b'tu', status=200)
@@ -424,6 +438,56 @@ def test_collect_writes_run_record_on_unexpected_worker_error(
         Bucket=_bucket, Prefix='curated/collector_run/',
     )
     assert listing['KeyCount'] == 1
+    body = client.get_object(
+        Bucket=_bucket, Key=listing['Contents'][0]['Key'],
+    )['Body'].read()
+    records = [
+        json.loads(line) for line in body.decode().splitlines()
+    ]
+    # One of the three workers crashed before it could hand back a
+    # PollOutcome at all, so only the siblings that completed are
+    # present — and their data must be real, not a placeholder.
+    assert len(records) == len(FAST_SCHEDULE) - 1
+    assert all(record['error'] is None for record in records)
+    assert all(record['body_bytes'] > 0 for record in records)
+
+
+@responses.activate
+def test_collect_writes_run_record_when_every_worker_crashes(
+    _bucket: str,
+) -> None:
+    """Total, correlated worker failure still leaves evidence.
+
+    An unenumerated exception type is, by construction, something
+    that would hit every worker identically rather than one poll in
+    isolation — a code bug or a new botocore base class. Even then,
+    "no objects and no audit record" must not be indistinguishable
+    from "the collector was never invoked".
+    """
+    responses.add(responses.GET, VEHICLE_URL, body=b'vp', status=200)
+    responses.add(responses.GET, TRIP_URL, body=b'tu', status=200)
+
+    with pytest.raises(ScheduleError):
+        collect(
+            schedule=FAST_SCHEDULE,
+            api_key='k',
+            repository=_AlwaysUnexpectedRepository(bucket=_bucket),
+            invocation_id='req-1',
+        )
+
+    client = boto3.client('s3', region_name=REGION)
+    listing = client.list_objects_v2(
+        Bucket=_bucket, Prefix='curated/collector_run/',
+    )
+    assert listing['KeyCount'] == 1
+    body = client.get_object(
+        Bucket=_bucket, Key=listing['Contents'][0]['Key'],
+    )['Body'].read()
+    records = [
+        json.loads(line) for line in body.decode().splitlines()
+    ]
+    assert len(records) == 1
+    assert records[0]['error'] is not None
 
 
 @responses.activate
