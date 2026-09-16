@@ -92,9 +92,13 @@ Resources:
       # retries — object keys use actual fetch time, not an intended
       # slot, because of this.
       Timeout: 65
-      # Caps a runaway retry storm while still permitting the
-      # intended overlap above.
-      ReservedConcurrentExecutions: 5
+      # No ReservedConcurrentExecutions. It would cap a runaway retry
+      # storm while still permitting the intended overlap above, but a
+      # new account's concurrency quota is 10, and AWS refuses any
+      # reservation that leaves fewer than 10 unreserved — so at this
+      # quota no reservation is possible at all. Runaway cost is still
+      # bounded by that same account quota of 10 and by the $25 budget
+      # alarm below. Reinstate this once the quota is raised.
       Environment:
         Variables:
           BUCKET_NAME: !Ref DataBucket

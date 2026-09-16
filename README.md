@@ -23,8 +23,8 @@ Attribution 4.0 licence. Data source: Transport for NSW.
     aws ssm put-parameter \
       --name /sydney-bus-reliability/tfnsw-api-key \
       --value '<key>' --type SecureString --region ap-southeast-2
-    uv export --no-dev --no-emit-project --format requirements-txt \
-      > requirements.txt
+    uv export --no-dev --no-emit-project --no-color \
+      --format requirements-txt -o requirements.txt
     sam build
     sam deploy --guided --parameter-overrides AlertEmail=<address>
 
