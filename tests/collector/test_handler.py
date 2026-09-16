@@ -1,21 +1,25 @@
 """Tests for the collector Lambda handler."""
 
+import dataclasses
 import threading
 import time
 
 import boto3
 import pytest
+import requests
 import responses
 from aws_lambda_powertools.utilities import parameters
 from botocore.exceptions import ClientError
 
 from src.collector.handler import (
+    PollContext,
     collect,
     handler,
     poll_schedule,
     read_api_key,
     read_offsets,
-    store_all,
+    record_run,
+    run_schedule,
 )
 from src.common.storage import RawFeedRepository
 from src.common.types_ import Feed
@@ -376,10 +380,91 @@ def test_read_api_key_falls_back_to_ssm(
     assert read_api_key() == 'from-ssm'
 
 
-def test_store_all_handles_empty_results(_bucket: str) -> None:
-    result = store_all(
+def test_record_run_handles_empty_results(_bucket: str) -> None:
+    result = record_run(
         results=[],
         repository=RawFeedRepository(bucket=_bucket),
         invocation_id='req-1',
     )
     assert result == {'fetched': 0, 'stored': 0, 'failed': 0}
+
+
+@responses.activate
+def test_poll_outcomes_carry_no_payload_bytes(_bucket: str) -> None:
+    """Nothing a worker hands back may retain the payload.
+
+    The audit trail needs ``body_bytes`` — an int — and never the
+    bytes themselves. If any field of an outcome is ``bytes``, the
+    large trip-updates body stays reachable for the whole
+    invocation, which is exactly the retention this change removes.
+    """
+    responses.add(responses.GET, VEHICLE_URL, body=b'vp', status=200)
+    responses.add(responses.GET, TRIP_URL, body=b'tu' * 4096, status=200)
+
+    outcomes = run_schedule(
+        schedule=FAST_SCHEDULE,
+        context=PollContext(
+            api_key='k',
+            session=requests.Session(),
+            semaphore=threading.Semaphore(2),
+            repository=RawFeedRepository(bucket=_bucket),
+        ),
+    )
+
+    assert len(outcomes) == 3
+    for outcome in outcomes:
+        values = dataclasses.asdict(outcome).values()
+        assert not any(isinstance(v, (bytes, bytearray)) for v in values)
+        assert not any(
+            isinstance(v, (bytes, bytearray))
+            for v in outcome.record.values()
+        )
+    assert {o.record['body_bytes'] for o in outcomes} == {2, 8192}
+
+
+@responses.activate
+def test_payloads_are_stored_before_the_last_poll_fires(
+    _bucket: str,
+) -> None:
+    """Each poll stores within its own worker, not at the end.
+
+    With storage batched after the last fetch, no put_object can
+    precede the final fire time. Storing inside the worker means
+    the earliest store lands well before the last poll goes out.
+    """
+    started_at = time.monotonic()
+    lock = threading.Lock()
+    fire_times: list[float] = []
+    put_times: list[float] = []
+
+    class _TimedRepository(RawFeedRepository):
+        """Records when each raw payload reaches S3."""
+
+        def put_raw(self, *, result):
+            key = super().put_raw(result=result)
+            with lock:
+                put_times.append(time.monotonic() - started_at)
+            return key
+
+    def callback(_request):
+        with lock:
+            fire_times.append(time.monotonic() - started_at)
+        time.sleep(SIMULATED_ROUND_TRIP_S)
+        return (200, {}, b'ok')
+
+    responses.add_callback(
+        responses.GET, VEHICLE_URL, callback=callback,
+    )
+    responses.add_callback(
+        responses.GET, TRIP_URL, callback=callback,
+    )
+
+    collect(
+        schedule=TIMING_SCHEDULE,
+        api_key='k',
+        repository=_TimedRepository(bucket=_bucket),
+        invocation_id='req-1',
+    )
+
+    assert len(put_times) == len(TIMING_SCHEDULE)
+    assert min(put_times) < max(fire_times)

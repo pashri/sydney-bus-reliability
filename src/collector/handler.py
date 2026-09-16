@@ -10,6 +10,13 @@ Every poll gets its own thread and sleeps until its own absolute
 offset from invocation start; only the network call itself is gated
 by a semaphore, so a slow or late poll never delays another poll's
 start — it can only ever delay itself.
+
+Each poll also stores its own payload, inside its own worker, as
+soon as the fetch returns and after the semaphore has been
+released. The body is then unreachable and its memory can be
+reused, so peak retention is bounded by the number of concurrent
+polls rather than by the whole schedule. The worker hands back only
+a ``RunRecord`` — counts and timestamps, never bytes.
 """
 
 import os
@@ -25,8 +32,8 @@ from aws_lambda_powertools.utilities import parameters
 from botocore.exceptions import ClientError
 
 from src.common.feeds import fetch_feed
-from src.common.storage import RawFeedRepository
-from src.common.types_ import CollectionCounts, Feed, FetchResult
+from src.common.storage import RawFeedRepository, run_record
+from src.common.types_ import CollectionCounts, Feed, FetchResult, RunRecord
 
 logger = Logger()
 
@@ -121,133 +128,29 @@ class PollContext:
     """Resources shared by every poll in one invocation.
 
     Bundled together so the per-poll functions below take one
-    logical argument for "how to fetch" instead of three positional
-    ones, keeping their signatures short.
+    logical argument for "how to fetch and where to put it" instead
+    of four positional ones, keeping their signatures short.
     """
 
     api_key: str
     session: requests.Session
     semaphore: threading.Semaphore
+    repository: RawFeedRepository
 
 
-def poll_at(
-    *,
-    offset_s: float,
-    feed: Feed,
-    started_at: float,
-    context: PollContext,
-) -> FetchResult:
-    """Wait until an absolute offset, then fetch once.
+@dataclass(frozen=True, slots=True)
+class PollOutcome:
+    """What one poll hands back once its payload is stored.
 
-    The offset is measured from invocation start, never from the
-    end of a prior poll, so a slow poll delays only itself and never
-    pushes back the start of the next scheduled poll. Each poll runs
-    on its own thread; the semaphore bounds only the concurrent
-    network calls, not the waiting, so it never reintroduces
-    chaining between polls.
-
-    Parameters
-    ----------
-    offset_s : float
-        Seconds after invocation start at which to issue the
-        request.
-    feed : Feed
-        The feed to fetch.
-    started_at : float
-        ``time.monotonic()`` captured at invocation start.
-    context : PollContext
-        Shared API key, session and rate-limiting semaphore.
-
-    Returns
-    -------
-    FetchResult
-        Never raises; failures are recorded in the result.
+    Deliberately holds no ``bytes``: the audit trail needs only the
+    payload's length, which ``RunRecord.body_bytes`` already
+    carries. Returning the body here would keep every payload of
+    the invocation alive inside the futures until the very end,
+    which is the retention this design exists to avoid.
     """
-    remaining = offset_s - (time.monotonic() - started_at)
-    if remaining > 0:
-        time.sleep(remaining)
-    with context.semaphore:
-        return fetch_feed(
-            feed=feed,
-            api_key=context.api_key,
-            session=context.session,
-        )
 
-
-def submit_polls(
-    *,
-    schedule: list[tuple[float, Feed]],
-    started_at: float,
-    context: PollContext,
-    pool: ThreadPoolExecutor,
-) -> list[Future[FetchResult]]:
-    """Submit every poll in the schedule to the pool at once.
-
-    Submitting all of them up front, rather than one at a time, is
-    what lets each poll's wait run concurrently with the others
-    instead of queueing behind them.
-
-    Parameters
-    ----------
-    schedule : list[tuple[float, Feed]]
-        Offsets in seconds and the feed to poll at each.
-    started_at : float
-        ``time.monotonic()`` captured at invocation start.
-    context : PollContext
-        Shared API key, session and rate-limiting semaphore.
-    pool : ThreadPoolExecutor
-        Executor with one worker per scheduled poll.
-
-    Returns
-    -------
-    list[Future[FetchResult]]
-        One future per scheduled poll, in schedule order.
-    """
-    return [
-        pool.submit(
-            poll_at,
-            offset_s=offset,
-            feed=feed,
-            started_at=started_at,
-            context=context,
-        )
-        for offset, feed in schedule
-    ]
-
-
-def run_schedule(
-    *,
-    schedule: list[tuple[float, Feed]],
-    context: PollContext,
-) -> list[FetchResult]:
-    """Fire every poll in the schedule at its own absolute offset.
-
-    One thread per poll, so a poll waiting on its offset (or blocked
-    on the semaphore behind an in-flight request) never occupies a
-    slot that another poll needs in order to start waiting on its
-    own offset.
-
-    Parameters
-    ----------
-    schedule : list[tuple[float, Feed]]
-        Offsets in seconds and the feed to poll at each.
-    context : PollContext
-        Shared API key, session and rate-limiting semaphore.
-
-    Returns
-    -------
-    list[FetchResult]
-        One result per scheduled poll, in schedule order.
-    """
-    started_at = time.monotonic()
-    with ThreadPoolExecutor(max_workers=len(schedule)) as pool:
-        futures = submit_polls(
-            schedule=schedule,
-            started_at=started_at,
-            context=context,
-            pool=pool,
-        )
-        return [future.result() for future in futures]
+    record: RunRecord
+    stored: bool
 
 
 def store_one(
@@ -305,22 +208,201 @@ def audit_record(
     return replace(result, error='storage failed')
 
 
-def store_all(
+def poll_at(
     *,
-    results: list[FetchResult],
-    repository: RawFeedRepository,
-    invocation_id: str,
-) -> CollectionCounts:
-    """Persist every payload and the invocation's audit record.
+    offset_s: float,
+    feed: Feed,
+    started_at: float,
+    context: PollContext,
+) -> FetchResult:
+    """Wait until an absolute offset, then fetch once.
 
-    The audit record is written even when every poll failed to
-    fetch or to store, because it is what answers "was the gap
-    TfNSW or me?" when a week of data looks empty.
+    The offset is measured from invocation start, never from the
+    end of a prior poll, so a slow poll delays only itself and never
+    pushes back the start of the next scheduled poll. Each poll runs
+    on its own thread; the semaphore bounds only the concurrent
+    network calls, not the waiting, so it never reintroduces
+    chaining between polls.
 
     Parameters
     ----------
-    results : list[FetchResult]
-        Every fetch attempted.
+    offset_s : float
+        Seconds after invocation start at which to issue the
+        request.
+    feed : Feed
+        The feed to fetch.
+    started_at : float
+        ``time.monotonic()`` captured at invocation start.
+    context : PollContext
+        Shared API key, session and rate-limiting semaphore.
+
+    Returns
+    -------
+    FetchResult
+        Never raises; failures are recorded in the result.
+    """
+    remaining = offset_s - (time.monotonic() - started_at)
+    if remaining > 0:
+        time.sleep(remaining)
+    with context.semaphore:
+        return fetch_feed(
+            feed=feed,
+            api_key=context.api_key,
+            session=context.session,
+        )
+
+
+def poll_and_store(
+    *,
+    offset_s: float,
+    feed: Feed,
+    started_at: float,
+    context: PollContext,
+) -> PollOutcome:
+    """Fetch one feed at its offset and store it straight away.
+
+    Storing here, in the poll's own worker, is what keeps peak
+    memory bounded by the number of concurrent polls instead of by
+    the whole schedule: ``result`` dies with this frame, so the body
+    becomes collectable the moment the store returns. It also
+    spreads the S3 writes across the invocation rather than
+    clustering them after the last poll.
+
+    The store runs *outside* ``poll_at``'s semaphore, which
+    ``poll_at`` has already released by the time it returns. Holding
+    the semaphore across an S3 write would queue later polls behind
+    a slow upload and reintroduce the chaining bug that made trip
+    updates fire ~40s late.
+
+    Parameters
+    ----------
+    offset_s : float
+        Seconds after invocation start at which to issue the
+        request.
+    feed : Feed
+        The feed to fetch.
+    started_at : float
+        ``time.monotonic()`` captured at invocation start.
+    context : PollContext
+        Shared API key, session, semaphore and repository.
+
+    Returns
+    -------
+    PollOutcome
+        Metadata only. Neither a fetch failure nor a store failure
+        raises, so one poll can never lose its siblings.
+    """
+    result = poll_at(
+        offset_s=offset_s,
+        feed=feed,
+        started_at=started_at,
+        context=context,
+    )
+    key, store_failed = store_one(
+        result=result, repository=context.repository,
+    )
+    audited = audit_record(result=result, store_failed=store_failed)
+    return PollOutcome(
+        record=run_record(result=audited), stored=key is not None,
+    )
+
+
+def submit_polls(
+    *,
+    schedule: list[tuple[float, Feed]],
+    started_at: float,
+    context: PollContext,
+    pool: ThreadPoolExecutor,
+) -> list[Future[PollOutcome]]:
+    """Submit every poll in the schedule to the pool at once.
+
+    Submitting all of them up front, rather than one at a time, is
+    what lets each poll's wait run concurrently with the others
+    instead of queueing behind them.
+
+    Parameters
+    ----------
+    schedule : list[tuple[float, Feed]]
+        Offsets in seconds and the feed to poll at each.
+    started_at : float
+        ``time.monotonic()`` captured at invocation start.
+    context : PollContext
+        Shared API key, session, semaphore and repository.
+    pool : ThreadPoolExecutor
+        Executor with one worker per scheduled poll.
+
+    Returns
+    -------
+    list[Future[PollOutcome]]
+        One future per scheduled poll, in schedule order. The
+        futures hold metadata only, so a completed poll's payload is
+        not kept alive by the future that produced it.
+    """
+    return [
+        pool.submit(
+            poll_and_store,
+            offset_s=offset,
+            feed=feed,
+            started_at=started_at,
+            context=context,
+        )
+        for offset, feed in schedule
+    ]
+
+
+def run_schedule(
+    *,
+    schedule: list[tuple[float, Feed]],
+    context: PollContext,
+) -> list[PollOutcome]:
+    """Fire every poll in the schedule at its own absolute offset.
+
+    One thread per poll, so a poll waiting on its offset (or blocked
+    on the semaphore behind an in-flight request) never occupies a
+    slot that another poll needs in order to start waiting on its
+    own offset.
+
+    Parameters
+    ----------
+    schedule : list[tuple[float, Feed]]
+        Offsets in seconds and the feed to poll at each.
+    context : PollContext
+        Shared API key, session, semaphore and repository.
+
+    Returns
+    -------
+    list[PollOutcome]
+        One outcome per scheduled poll, in schedule order, each
+        already stored and carrying no payload bytes.
+    """
+    started_at = time.monotonic()
+    with ThreadPoolExecutor(max_workers=len(schedule)) as pool:
+        futures = submit_polls(
+            schedule=schedule,
+            started_at=started_at,
+            context=context,
+            pool=pool,
+        )
+        return [future.result() for future in futures]
+
+
+def record_run(
+    *,
+    results: list[PollOutcome],
+    repository: RawFeedRepository,
+    invocation_id: str,
+) -> CollectionCounts:
+    """Write the invocation's audit record and tally the outcomes.
+
+    The payloads themselves are already stored by this point, each
+    by its own poll. What remains is the one record that answers
+    "was the gap TfNSW or me?", and it is written even when every
+    poll failed to fetch or to store.
+
+    Parameters
+    ----------
+    results : list[PollOutcome]
+        Every poll attempted, with its payload already stored.
     repository : RawFeedRepository
         Destination repository.
     invocation_id : str
@@ -334,24 +416,16 @@ def store_all(
     """
     if not results:
         return CollectionCounts(fetched=0, stored=0, failed=0)
-    stored_keys: list[str] = []
-    audited: list[FetchResult] = []
-    for result in results:
-        key, store_failed = store_one(
-            result=result, repository=repository,
-        )
-        if key is not None:
-            stored_keys.append(key)
-        audited.append(
-            audit_record(result=result, store_failed=store_failed),
-        )
     repository.put_run_record(
-        results=audited, invocation_id=invocation_id,
+        records=[outcome.record for outcome in results],
+        invocation_id=invocation_id,
     )
     return CollectionCounts(
         fetched=len(results),
-        stored=len(stored_keys),
-        failed=sum(1 for r in audited if r.error is not None),
+        stored=sum(1 for o in results if o.stored),
+        failed=sum(
+            1 for o in results if o.record['error'] is not None
+        ),
     )
 
 
@@ -388,10 +462,11 @@ def collect(
         api_key=api_key,
         session=requests.Session(),
         semaphore=threading.Semaphore(MAX_CONCURRENT_POLLS),
+        repository=repository,
     )
-    results = run_schedule(schedule=schedule, context=context)
-    return store_all(
-        results=results,
+    outcomes = run_schedule(schedule=schedule, context=context)
+    return record_run(
+        results=outcomes,
         repository=repository,
         invocation_id=invocation_id,
     )

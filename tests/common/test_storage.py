@@ -7,7 +7,7 @@ from http import HTTPStatus
 
 import boto3
 
-from src.common.storage import RawFeedRepository, raw_key, run_key
+from src.common.storage import RawFeedRepository, raw_key, run_key, run_record
 from src.common.types_ import Feed, FetchResult
 
 REGION = 'ap-southeast-2'
@@ -73,7 +73,10 @@ def test_put_run_record_writes_one_line_per_result(
 ) -> None:
     repo = RawFeedRepository(bucket=_bucket)
     key = repo.put_run_record(
-        results=[_ok_result(), _ok_result(body=b'second')],
+        records=[
+            run_record(result=_ok_result()),
+            run_record(result=_ok_result(body=b'second')),
+        ],
         invocation_id='abc-123',
     )
     client = boto3.client('s3', region_name=REGION)
@@ -101,7 +104,9 @@ def test_put_run_record_handles_missing_server_date(
         error='timeout',
     )
     repo = RawFeedRepository(bucket=_bucket)
-    key = repo.put_run_record(results=[result], invocation_id='x')
+    key = repo.put_run_record(
+        records=[run_record(result=result)], invocation_id='x',
+    )
     client = boto3.client('s3', region_name=REGION)
     body = client.get_object(Bucket=_bucket, Key=key)['Body'].read()
     record = json.loads(body.decode().strip())

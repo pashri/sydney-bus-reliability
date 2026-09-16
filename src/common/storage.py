@@ -156,15 +156,20 @@ class RawFeedRepository:
     def put_run_record(
         self,
         *,
-        results: list[FetchResult],
+        records: list[RunRecord],
         invocation_id: str,
     ) -> str:
         """Store one JSON Lines audit record per invocation.
 
+        Takes already-summarised records rather than ``FetchResult``
+        objects so that the caller can discard each payload as soon
+        as it is stored, instead of holding every body alive until
+        the audit record is written.
+
         Parameters
         ----------
-        results : list[FetchResult]
-            Every fetch attempted in this invocation.
+        records : list[RunRecord]
+            One summary per fetch attempted in this invocation.
         invocation_id : str
             Lambda request id.
 
@@ -174,12 +179,13 @@ class RawFeedRepository:
             The key written.
         """
         key = run_key(
-            fetched_at=results[0].fetched_at_utc,
+            fetched_at=datetime.fromisoformat(
+                records[0]['fetched_at_utc'],
+            ),
             invocation_id=invocation_id,
         )
         lines = '\n'.join(
-            json.dumps(run_record(result=result))
-            for result in results
+            json.dumps(record) for record in records
         )
         self.client.put_object(
             Bucket=self.bucket,
