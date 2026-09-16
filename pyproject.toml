@@ -18,6 +18,7 @@ dev = [
     "pylint>=3.3",
     "isort>=5.13",
     "types-requests",
+    "boto3-stubs[s3]>=1.35",
     "gtfs-realtime-bindings>=1.0",
 ]
 
