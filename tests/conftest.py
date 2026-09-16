@@ -30,3 +30,15 @@ def _bucket(_credentials: None) -> Iterator[str]:
             CreateBucketConfiguration={'LocationConstraint': REGION},
         )
         yield BUCKET
+
+
+@pytest.fixture
+def _ssm_parameter(_credentials: None) -> Iterator[str]:
+    """Create a SecureString API key in a mocked SSM."""
+    name = '/sydney-bus-reliability/tfnsw-api-key'
+    with mock_aws():
+        client = boto3.client('ssm', region_name=REGION)
+        client.put_parameter(
+            Name=name, Value='from-ssm', Type='SecureString',
+        )
+        yield name

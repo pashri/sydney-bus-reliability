@@ -647,6 +647,9 @@ s3 = [
     { name = "py-partiql-parser" },
     { name = "pyyaml" },
 ]
+ssm = [
+    { name = "pyyaml" },
+]
 
 [[package]]
 name = "mypy"
@@ -937,7 +940,7 @@ dev = [
     { name = "boto3-stubs", extra = ["s3"] },
     { name = "gtfs-realtime-bindings" },
     { name = "isort" },
-    { name = "moto", extra = ["s3"] },
+    { name = "moto", extra = ["s3", "ssm"] },
     { name = "mypy" },
     { name = "pylint" },
     { name = "pytest" },
@@ -958,7 +961,7 @@ dev = [
     { name = "boto3-stubs", extras = ["s3"], specifier = ">=1.35" },
     { name = "gtfs-realtime-bindings", specifier = ">=1.0" },
     { name = "isort", specifier = ">=5.13" },
-    { name = "moto", extras = ["s3"], specifier = ">=5.0" },
+    { name = "moto", extras = ["s3", "ssm"], specifier = ">=5.0" },
     { name = "mypy", specifier = ">=1.13" },
     { name = "pylint", specifier = ">=3.3" },
     { name = "pytest", specifier = ">=8.3" },

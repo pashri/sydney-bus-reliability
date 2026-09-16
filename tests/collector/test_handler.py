@@ -6,12 +6,14 @@ import time
 import boto3
 import pytest
 import responses
+from aws_lambda_powertools.utilities import parameters
 from botocore.exceptions import ClientError
 
 from src.collector.handler import (
     collect,
     handler,
     poll_schedule,
+    read_api_key,
     read_offsets,
     store_all,
 )
@@ -354,6 +356,24 @@ def test_store_all_writes_run_record_when_every_store_fails(
         Bucket=_bucket, Prefix='curated/collector_run/',
     )
     assert listing['KeyCount'] == 1
+
+
+def test_read_api_key_prefers_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv('TFNSW_API_KEY', 'from-env')
+    assert read_api_key() == 'from-env'
+
+
+def test_read_api_key_falls_back_to_ssm(
+    _ssm_parameter: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv('TFNSW_API_KEY', raising=False)
+    monkeypatch.setenv('API_KEY_PARAMETER_NAME', _ssm_parameter)
+    parameters.clear_caches()
+
+    assert read_api_key() == 'from-ssm'
 
 
 def test_store_all_handles_empty_results(_bucket: str) -> None:

@@ -21,6 +21,7 @@ from typing import Any, Final
 
 import requests
 from aws_lambda_powertools import Logger
+from aws_lambda_powertools.utilities import parameters
 from botocore.exceptions import ClientError
 
 from src.common.feeds import fetch_feed
@@ -82,6 +83,22 @@ def read_offsets() -> tuple[float, ...]:
     for offset in offsets:
         validate_offset(offset=offset)
     return offsets
+
+
+def read_api_key() -> str:
+    """Read the TfNSW API key, preferring the environment in tests.
+
+    Returns
+    -------
+    str
+        The API key.
+    """
+    from_env = os.getenv('TFNSW_API_KEY')
+    if from_env is not None:
+        return from_env
+    return parameters.get_parameter(
+        os.environ['API_KEY_PARAMETER_NAME'], decrypt=True, max_age=3600,
+    )
 
 
 def poll_schedule() -> list[tuple[float, Feed]]:
@@ -402,7 +419,7 @@ def handler(
     """
     counts = collect(
         schedule=poll_schedule(),
-        api_key=os.environ['TFNSW_API_KEY'],
+        api_key=read_api_key(),
         repository=RawFeedRepository(bucket=os.environ['BUCKET_NAME']),
         invocation_id=context.aws_request_id,
     )

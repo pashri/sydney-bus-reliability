@@ -1,0 +1,145 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Sydney bus GTFS-Realtime collector
+
+Parameters:
+  AlertEmail:
+    Type: String
+    Description: Address for collector alarms
+  ApiKeyParameterName:
+    Type: String
+    Default: /sydney-bus-reliability/tfnsw-api-key
+
+Globals:
+  Function:
+    Runtime: python3.14
+    Architectures: [arm64]
+
+Resources:
+  DataBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'sydney-bus-reliability-${AWS::AccountId}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireRaw
+            Status: Enabled
+            Prefix: raw/
+            ExpirationInDays: 30
+
+  AlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: sydney-bus-reliability-alerts
+
+  AlertSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Protocol: email
+      Endpoint: !Ref AlertEmail
+      TopicArn: !Ref AlertTopic
+
+  CollectorLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/sydney-bus-reliability-collector
+      RetentionInDays: 30
+
+  CollectorFunction:
+    Type: AWS::Serverless::Function
+    DependsOn: CollectorLogGroup
+    Properties:
+      FunctionName: sydney-bus-reliability-collector
+      CodeUri: .
+      Handler: src.collector.handler.handler
+      MemorySize: 256
+      Timeout: 65
+      ReservedConcurrentExecutions: 5
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref DataBucket
+          VEHICLE_OFFSETS_S: '0,10,20,30,40,50'
+          API_KEY_PARAMETER_NAME: !Ref ApiKeyParameterName
+          POWERTOOLS_SERVICE_NAME: collector
+          POWERTOOLS_LOG_LEVEL: INFO
+      Policies:
+        - S3WritePolicy:
+            BucketName: !Ref DataBucket
+        - SSMParameterWithSlashPrefixReadPolicy:
+            ParameterName: !Ref ApiKeyParameterName
+      Events:
+        EveryMinute:
+          Type: Schedule
+          Properties:
+            Schedule: rate(1 minute)
+
+  CollectorSilentAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: collector-not-running
+      AlarmDescription: No collector invocations in 15 minutes
+      Namespace: AWS/Lambda
+      MetricName: Invocations
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref CollectorFunction
+      Statistic: Sum
+      Period: 900
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      AlarmActions: [!Ref AlertTopic]
+
+  CollectorErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: collector-erroring
+      AlarmDescription: Collector invocation errors
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref CollectorFunction
+      Statistic: Sum
+      Period: 900
+      EvaluationPeriods: 1
+      Threshold: 3
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopic]
+
+  MonthlyBudget:
+    Type: AWS::Budgets::Budget
+    Properties:
+      Budget:
+        BudgetName: sydney-bus-reliability
+        BudgetType: COST
+        TimeUnit: MONTHLY
+        BudgetLimit:
+          Amount: 25
+          Unit: USD
+      NotificationsWithSubscribers:
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: 80
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - SubscriptionType: EMAIL
+              Address: !Ref AlertEmail
+
+Outputs:
+  BucketName:
+    Value: !Ref DataBucket
+  CollectorFunctionName:
+    Value: !Ref CollectorFunction

@@ -1,0 +1,7 @@
+version = 0.1
+
+[default.deploy.parameters]
+stack_name = "sydney-bus-reliability"
+region = "ap-southeast-2"
+capabilities = "CAPABILITY_IAM"
+resolve_s3 = true
