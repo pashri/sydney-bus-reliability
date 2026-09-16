@@ -15,7 +15,7 @@ def parse_server_date(*, header_value: str) -> datetime:
 
     Parameters
     ----------
-    header_value
+    header_value : str
         Raw header value in RFC 7231 format.
 
     Returns
@@ -41,9 +41,9 @@ def round_trip_seconds(
 
     Parameters
     ----------
-    sent_at
+    sent_at : datetime
         Local time immediately before the request was issued.
-    received_at
+    received_at : datetime
         Local time immediately after the response arrived.
 
     Returns
@@ -70,11 +70,11 @@ def skew_seconds(
 
     Parameters
     ----------
-    server_time
+    server_time : datetime
         Timestamp from the server's ``Date`` header.
-    sent_at
+    sent_at : datetime
         Local time immediately before the request was issued.
-    received_at
+    received_at : datetime
         Local time immediately after the response arrived.
 
     Returns

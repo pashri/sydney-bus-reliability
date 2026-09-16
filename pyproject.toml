@@ -20,6 +20,7 @@ dev = [
     "types-requests",
     "boto3-stubs[s3]>=1.35",
     "gtfs-realtime-bindings>=1.0",
+    "numpydoc>=1.11.0",
 ]
 
 [tool.isort]
@@ -34,3 +35,14 @@ addopts = "--cov=src --cov-report=term-missing"
 [tool.mypy]
 python_version = "3.14"
 strict = true
+
+[tool.numpydoc_validation]
+checks = [
+    "all",   # report on all checks, except the below
+    "EX01",  # don't require "Examples" section
+    "SA01",  # don't require "See Also" section
+    "ES01",  # don't require extended summary
+]
+exclude = [
+    "\\.__init__$",
+]

@@ -1,0 +1,1 @@
+"""Collector Lambda package."""

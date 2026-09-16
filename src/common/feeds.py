@@ -25,7 +25,7 @@ def feed_url(*, feed: Feed) -> str:
 
     Parameters
     ----------
-    feed
+    feed : Feed
         The feed to address.
 
     Returns
@@ -43,7 +43,7 @@ def read_server_date(*, response: requests.Response) -> (
 
     Parameters
     ----------
-    response
+    response : requests.Response
         A completed HTTP response.
 
     Returns
@@ -74,11 +74,11 @@ def fetch_feed(
 
     Parameters
     ----------
-    feed
+    feed : Feed
         The feed to fetch.
-    api_key
+    api_key : str
         TfNSW Open Data Hub API key.
-    session
+    session : requests.Session | None
         Optional session to reuse a connection pool.
 
     Returns
@@ -128,13 +128,13 @@ def _result_from(
 
     Parameters
     ----------
-    feed
+    feed : Feed
         The feed that was fetched.
-    fetched_at
+    fetched_at : datetime
         When the request was issued.
-    received_at
+    received_at : datetime
         When the response finished arriving.
-    response
+    response : requests.Response
         The completed response.
 
     Returns

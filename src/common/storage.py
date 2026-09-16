@@ -1,5 +1,4 @@
-"""Persistence of raw feed payloads and per-invocation audit
-records."""
+"""Persistence of raw feed payloads and per-invocation audit records."""
 
 import gzip
 import json
@@ -26,9 +25,9 @@ def raw_key(*, feed: Feed, fetched_at: datetime) -> str:
 
     Parameters
     ----------
-    feed
+    feed : Feed
         The feed the payload came from.
-    fetched_at
+    fetched_at : datetime
         UTC time the request was issued.
 
     Returns
@@ -47,10 +46,10 @@ def run_key(*, fetched_at: datetime, invocation_id: str) -> str:
 
     Parameters
     ----------
-    fetched_at
+    fetched_at : datetime
         Any UTC timestamp from the invocation, used for
         partitioning.
-    invocation_id
+    invocation_id : str
         Lambda request id, unique per invocation.
 
     Returns
@@ -69,7 +68,7 @@ def run_record(*, result: FetchResult) -> RunRecord:
 
     Parameters
     ----------
-    result
+    result : FetchResult
         The fetch to summarise.
 
     Returns
@@ -106,8 +105,15 @@ def run_record(*, result: FetchResult) -> RunRecord:
 
 
 class RawFeedRepository:
-    """Writes raw payloads and audit records to one S3
-    bucket."""
+    """Writes raw payloads and audit records to one S3 bucket.
+
+    Parameters
+    ----------
+    bucket : str
+        S3 bucket name.
+    session : boto3.Session | None
+        Optional boto3 session. Defaults to a new session.
+    """
 
     def __init__(
         self,
@@ -115,15 +121,6 @@ class RawFeedRepository:
         bucket: str,
         session: boto3.Session | None = None,
     ) -> None:
-        """Initialize repository with bucket and optional session.
-
-        Parameters
-        ----------
-        bucket
-            S3 bucket name.
-        session
-            Optional boto3 session. Defaults to a new session.
-        """
         session = session or boto3.Session()
         self.bucket = bucket
         self.client = session.client('s3')
@@ -133,7 +130,7 @@ class RawFeedRepository:
 
         Parameters
         ----------
-        result
+        result : FetchResult
             The fetch to store.
 
         Returns
@@ -166,9 +163,9 @@ class RawFeedRepository:
 
         Parameters
         ----------
-        results
+        results : list[FetchResult]
             Every fetch attempted in this invocation.
-        invocation_id
+        invocation_id : str
             Lambda request id.
 
         Returns

@@ -18,6 +18,7 @@ jobs:
       - run: uv run mypy src/
       - run: uv run isort --check-only src/ tests/
       - run: uv run pylint src/
+      - run: uv run numpydoc lint $(find src -name "*.py")
 
   template:
     runs-on: ubuntu-latest

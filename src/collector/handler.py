@@ -40,7 +40,7 @@ def validate_offset(*, offset: float) -> None:
 
     Parameters
     ----------
-    offset
+    offset : float
         Seconds after invocation start.
 
     Raises
@@ -148,14 +148,14 @@ def poll_at(
 
     Parameters
     ----------
-    offset_s
+    offset_s : float
         Seconds after invocation start at which to issue the
         request.
-    feed
+    feed : Feed
         The feed to fetch.
-    started_at
+    started_at : float
         ``time.monotonic()`` captured at invocation start.
-    context
+    context : PollContext
         Shared API key, session and rate-limiting semaphore.
 
     Returns
@@ -189,13 +189,13 @@ def submit_polls(
 
     Parameters
     ----------
-    schedule
+    schedule : list[tuple[float, Feed]]
         Offsets in seconds and the feed to poll at each.
-    started_at
+    started_at : float
         ``time.monotonic()`` captured at invocation start.
-    context
+    context : PollContext
         Shared API key, session and rate-limiting semaphore.
-    pool
+    pool : ThreadPoolExecutor
         Executor with one worker per scheduled poll.
 
     Returns
@@ -229,9 +229,9 @@ def run_schedule(
 
     Parameters
     ----------
-    schedule
+    schedule : list[tuple[float, Feed]]
         Offsets in seconds and the feed to poll at each.
-    context
+    context : PollContext
         Shared API key, session and rate-limiting semaphore.
 
     Returns
@@ -257,9 +257,9 @@ def store_one(
 
     Parameters
     ----------
-    result
+    result : FetchResult
         The fetch to store.
-    repository
+    repository : RawFeedRepository
         Destination repository.
 
     Returns
@@ -287,9 +287,9 @@ def audit_record(
 
     Parameters
     ----------
-    result
+    result : FetchResult
         The original fetch outcome.
-    store_failed
+    store_failed : bool
         Whether storing this result's payload raised.
 
     Returns
@@ -319,11 +319,11 @@ def store_all(
 
     Parameters
     ----------
-    results
+    results : list[FetchResult]
         Every fetch attempted.
-    repository
+    repository : RawFeedRepository
         Destination repository.
-    invocation_id
+    invocation_id : str
         Lambda request id.
 
     Returns
@@ -369,13 +369,13 @@ def collect(
 
     Parameters
     ----------
-    schedule
+    schedule : list[tuple[float, Feed]]
         Offsets in seconds and the feed to poll at each.
-    api_key
+    api_key : str
         TfNSW Open Data Hub API key.
-    repository
+    repository : RawFeedRepository
         Destination for payloads and the audit record.
-    invocation_id
+    invocation_id : str
         Lambda request id.
 
     Returns
@@ -406,9 +406,9 @@ def handler(
 
     Parameters
     ----------
-    event
+    event : dict[str, Any]
         EventBridge event; unused.
-    context
+    context : Any
         Lambda context, read for ``aws_request_id``.
 
     Returns
