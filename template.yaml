@@ -89,6 +89,10 @@ Resources:
           API_KEY_PARAMETER_NAME: !Ref ApiKeyParameterName
           POWERTOOLS_SERVICE_NAME: collector
           POWERTOOLS_LOG_LEVEL: INFO
+          # 7 poll threads per invocation, ~10k/day, and glibc never
+          # returns a thread's malloc arena to the OS. Capping arenas
+          # stops RSS ratcheting up on thread churn alone.
+          MALLOC_ARENA_MAX: '2'
       Policies:
         - S3WritePolicy:
             BucketName: !Ref DataBucket
