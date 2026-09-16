@@ -86,12 +86,17 @@ Resources:
       # twice as fast.
       MemorySize: 256
       # The last scheduled poll starts at t+50s and needs its HTTP
-      # round trip plus S3 write; the 3s platform default would
-      # break everything. A 65s timeout against a 60s schedule means
-      # invocations overlap by design in steady state, not just on
-      # retries — object keys use actual fetch time, not an intended
-      # slot, because of this.
-      Timeout: 65
+      # round trip plus S3 write, so duration is structurally ~51s+;
+      # the 3s platform default would break everything. A timeout
+      # under the 60s schedule interval means invocations overlap by
+      # design in steady state, not just on retries — object keys use
+      # actual fetch time, not an intended slot, because of this.
+      # The spec's floor is 65s. Set well above it because observed
+      # duration reached 55s before the morning peak and was still
+      # climbing: raising this costs nothing (Lambda bills actual
+      # duration, not the configured ceiling), while hitting it would
+      # kill the invocation and lose that minute permanently.
+      Timeout: 120
       # No ReservedConcurrentExecutions. It would cap a runaway retry
       # storm while still permitting the intended overlap above, but a
       # new account's concurrency quota is 10, and AWS refuses any
