@@ -74,3 +74,19 @@ def test_fetch_feed_tolerates_missing_date_header() -> None:
     result = fetch_feed(feed=Feed.VEHICLE_POSITIONS, api_key='k')
     assert result.server_date_utc is None
     assert result.body == b'x'
+
+
+@responses.activate
+def test_fetch_feed_tolerates_unparseable_date_header() -> None:
+    responses.add(
+        responses.GET,
+        VEHICLE_URL,
+        body=b'x',
+        status=200,
+        headers={'Date': 'not-a-date'},
+    )
+    result = fetch_feed(feed=Feed.VEHICLE_POSITIONS, api_key='k')
+    assert result.status_code == HTTPStatus.OK
+    assert result.body == b'x'
+    assert result.server_date_utc is None
+    assert result.error is None
