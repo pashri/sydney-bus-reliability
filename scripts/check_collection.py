@@ -32,22 +32,43 @@ MAX_WORKERS: Final[int] = 16
 EXAMPLE_LIMIT: Final[int] = 5
 WORST_GAPS_LIMIT: Final[int] = 10
 EXPECTED_PER_MINUTE: Final[int] = 6
-EXPECTED_PER_DAY: Final[dict[str, int]] = {
-    Feed.VEHICLE_POSITIONS.value: 8_640,
-    Feed.TRIP_UPDATES.value: 1_440,
+MINUTES_PER_DAY: Final[int] = 24 * 60
+EXPECTED_PER_MINUTE_BY_FEED: Final[dict[str, int]] = {
+    Feed.VEHICLE_POSITIONS.value: 6,
+    Feed.TRIP_UPDATES.value: 1,
 }
 
 
 @dataclass(frozen=True, slots=True)
+class CollectionWindow:
+    """The observed span of activity within a day's audit rows.
+
+    Attributes
+    ----------
+    start : datetime
+        Earliest ``fetched_at_utc`` seen across all rows.
+    end : datetime
+        Latest ``fetched_at_utc`` seen across all rows.
+    minutes : int
+        Whole minutes spanned, inclusive of both ends.
+    """
+
+    start: datetime
+    end: datetime
+    minutes: int
+
+
+@dataclass(frozen=True, slots=True)
 class FeedCount:
-    """Actual versus expected polls for one feed in one day.
+    """Actual versus expected polls for one feed, over one window.
 
     Attributes
     ----------
     actual : int
         Number of audit rows seen for this feed.
     expected : int
-        Number of polls a full UTC day should produce.
+        Polls expected over the observed collection window, not a
+        fixed daily total, so a partial day is not misread as loss.
     """
 
     actual: int
@@ -166,9 +187,15 @@ class CollectionSummary:  # pylint: disable=too-many-instance-attributes
     payload_by_feed : dict[str, BytesStats]
         Payload size stats, keyed by feed name.
     total_bytes : int
-        Total ``body_bytes`` across every row.
+        Total uncompressed ``body_bytes`` across every row. This
+        is what was fetched, not what is stored — S3 objects are
+        gzipped and considerably smaller.
     coverage : CoverageSummary
-        Per-minute coverage of the vehiclepos feed.
+        Per-minute coverage of the vehiclepos feed, within the
+        observed collection window only.
+    window : CollectionWindow | None
+        The observed span of activity, or None if there were no
+        rows at all.
     """
 
     feed_counts: dict[str, FeedCount]
@@ -179,15 +206,20 @@ class CollectionSummary:  # pylint: disable=too-many-instance-attributes
     payload_by_feed: dict[str, BytesStats]
     total_bytes: int
     coverage: CoverageSummary
+    window: CollectionWindow | None
 
 
-def _feed_counts(rows: list[RunRecord]) -> dict[str, FeedCount]:
-    """Tally actual polls per feed against the expected daily total.
+def _feed_counts(
+    rows: list[RunRecord], *, window_minutes: int,
+) -> dict[str, FeedCount]:
+    """Tally actual polls per feed against the observed window.
 
     Parameters
     ----------
     rows : list[RunRecord]
         Audit rows for the day.
+    window_minutes : int
+        Minutes the collector was actually observed running for.
 
     Returns
     -------
@@ -196,8 +228,11 @@ def _feed_counts(rows: list[RunRecord]) -> dict[str, FeedCount]:
     """
     actual = Counter(row['feed'] for row in rows)
     return {
-        feed: FeedCount(actual=actual.get(feed, 0), expected=expected)
-        for feed, expected in EXPECTED_PER_DAY.items()
+        feed: FeedCount(
+            actual=actual.get(feed, 0),
+            expected=window_minutes * per_minute,
+        )
+        for feed, per_minute in EXPECTED_PER_MINUTE_BY_FEED.items()
     }
 
 
@@ -300,38 +335,64 @@ def _payload_by_feed(rows: list[RunRecord]) -> dict[str, BytesStats]:
     }
 
 
-def _minute_grid(*, date: str) -> list[str]:
-    """List every minute of a UTC day as ``HH:MM`` strings.
-
-    Parameters
-    ----------
-    date : str
-        The day, as ``YYYY-MM-DD``.
-
-    Returns
-    -------
-    list[str]
-        1,440 minute labels, in order, starting at ``00:00``.
-    """
-    start = datetime.fromisoformat(date).replace(tzinfo=UTC)
-    return [
-        (start + timedelta(minutes=offset)).strftime('%H:%M')
-        for offset in range(24 * 60)
-    ]
-
-
-def _coverage_summary(
-    rows: list[RunRecord], *, date: str,
-) -> CoverageSummary:
-    """Find minutes of the day with too few vehiclepos polls.
+def _collection_window(
+    rows: list[RunRecord],
+) -> CollectionWindow | None:
+    """Find the observed span of activity across all rows.
 
     Parameters
     ----------
     rows : list[RunRecord]
         Audit rows for the day.
-    date : str
-        The day, as ``YYYY-MM-DD``, used to build the full grid
-        of minutes so that a minute with zero polls is not missed.
+
+    Returns
+    -------
+    CollectionWindow | None
+        The observed window, or None if `rows` is empty.
+    """
+    if not rows:
+        return None
+    fetched_ats = [
+        datetime.fromisoformat(row['fetched_at_utc']) for row in rows
+    ]
+    start, end = min(fetched_ats), max(fetched_ats)
+    minutes = int((end - start).total_seconds() // 60) + 1
+    return CollectionWindow(start=start, end=end, minutes=minutes)
+
+
+def _minute_labels(*, window: CollectionWindow) -> list[str]:
+    """List every minute of a window as ``HH:MM`` strings.
+
+    Parameters
+    ----------
+    window : CollectionWindow
+        The observed span of activity.
+
+    Returns
+    -------
+    list[str]
+        One label per minute, in order, starting at the window's
+        first minute.
+    """
+    floor_start = window.start.replace(second=0, microsecond=0)
+    return [
+        (floor_start + timedelta(minutes=offset)).strftime('%H:%M')
+        for offset in range(window.minutes)
+    ]
+
+
+def _coverage_summary(
+    rows: list[RunRecord], *, window: CollectionWindow,
+) -> CoverageSummary:
+    """Find minutes within the window with too few vehiclepos polls.
+
+    Parameters
+    ----------
+    rows : list[RunRecord]
+        Audit rows for the day.
+    window : CollectionWindow
+        The observed span of activity. Minutes outside it are not
+        evaluated, since the collector was not running then.
 
     Returns
     -------
@@ -345,24 +406,42 @@ def _coverage_summary(
     per_minute = Counter(row['fetched_at_utc'][11:16] for row in vehiclepos)
     gaps = [
         CoverageGap(minute=minute, count=per_minute.get(minute, 0))
-        for minute in _minute_grid(date=date)
+        for minute in _minute_labels(window=window)
         if per_minute.get(minute, 0) < EXPECTED_PER_MINUTE
     ]
     worst = sorted(gaps, key=lambda gap: gap.count)[:WORST_GAPS_LIMIT]
     return CoverageSummary(minutes_short=len(gaps), worst=worst)
 
 
-def summarize_day(
-    rows: list[RunRecord], *, date: str,
-) -> CollectionSummary:
+def _coverage_for(
+    rows: list[RunRecord], *, window: CollectionWindow | None,
+) -> CoverageSummary:
+    """Compute coverage gaps, or an empty result with no window.
+
+    Parameters
+    ----------
+    rows : list[RunRecord]
+        Audit rows for the day.
+    window : CollectionWindow | None
+        The observed span of activity, or None if `rows` is empty.
+
+    Returns
+    -------
+    CoverageSummary
+        Coverage gaps within `window`, or an empty summary.
+    """
+    if window is None:
+        return CoverageSummary(minutes_short=0, worst=[])
+    return _coverage_summary(rows, window=window)
+
+
+def summarize_day(rows: list[RunRecord]) -> CollectionSummary:
     """Summarise one UTC day's audit rows. Pure, no I/O.
 
     Parameters
     ----------
     rows : list[RunRecord]
         Every audit row for the day, in any order.
-    date : str
-        The day the rows belong to, as ``YYYY-MM-DD`` UTC.
 
     Returns
     -------
@@ -372,15 +451,18 @@ def summarize_day(
     rtts = [row['rtt_s'] for row in rows]
     skews = [row['skew_s'] for row in rows if row['skew_s'] is not None]
     total_bytes = sum(row['body_bytes'] for row in rows)
+    window = _collection_window(rows)
+    window_minutes = window.minutes if window else MINUTES_PER_DAY
     return CollectionSummary(
-        feed_counts=_feed_counts(rows),
+        feed_counts=_feed_counts(rows, window_minutes=window_minutes),
         status_counts=_status_counts(rows),
         failures=_failure_summary(rows),
         rtt=_timing_stats(rtts),
         skew=_timing_stats(skews),
         payload_by_feed=_payload_by_feed(rows),
         total_bytes=total_bytes,
-        coverage=_coverage_summary(rows, date=date),
+        coverage=_coverage_for(rows, window=window),
+        window=window,
     )
 
 
@@ -470,6 +552,58 @@ class CollectionRunRepository:
         return [row for rows in results for row in rows]
 
 
+def _fmt_duration(*, minutes: int) -> str:
+    """Format a minute count as ``HhMMm``.
+
+    Parameters
+    ----------
+    minutes : int
+        Duration in whole minutes.
+
+    Returns
+    -------
+    str
+        Duration formatted as e.g. ``4h 08m``.
+    """
+    hours, remainder = divmod(minutes, 60)
+    return f'{hours}h {remainder:02d}m'
+
+
+def _fmt_window(window: CollectionWindow | None) -> str:
+    """Format the observed collection window for display.
+
+    Parameters
+    ----------
+    window : CollectionWindow | None
+        The observed span of activity, or None if there were no
+        rows at all.
+
+    Returns
+    -------
+    str
+        A human-readable window description.
+    """
+    if window is None:
+        return 'no rows observed'
+    span = _fmt_duration(minutes=window.minutes)
+    return f'{window.start:%H:%M}–{window.end:%H:%M} UTC ({span})'
+
+
+def _print_window(summary: CollectionSummary) -> None:
+    """Print the observed collection window and a partial-day note.
+
+    Parameters
+    ----------
+    summary : CollectionSummary
+        The report to print from.
+    """
+    window = summary.window
+    print(f'collection window: {_fmt_window(window)}')
+    if window is not None and window.minutes < MINUTES_PER_DAY:
+        covered = _fmt_duration(minutes=window.minutes)
+        print(f'partial day: window covers {covered} of 24h')
+
+
 def _print_counts(summary: CollectionSummary) -> None:
     """Print poll count and status breakdowns.
 
@@ -478,7 +612,7 @@ def _print_counts(summary: CollectionSummary) -> None:
     summary : CollectionSummary
         The report to print from.
     """
-    print('\n== Poll counts ==')
+    print('\n== Poll counts (expected over the observed window) ==')
     for feed, count in summary.feed_counts.items():
         shortfall = count.expected - count.actual
         print(
@@ -506,6 +640,84 @@ def _print_failures(summary: CollectionSummary) -> None:
         print(f'  example: {example}')
 
 
+def _fmt_seconds(value: float) -> str:
+    """Format a timing value with fixed decimal places.
+
+    Parameters
+    ----------
+    value : float
+        A duration in seconds.
+
+    Returns
+    -------
+    str
+        `value` formatted to millisecond precision.
+    """
+    return f'{value:.3f}s'
+
+
+def _fmt_timing(stats: TimingStats | None) -> str:
+    """Format min/median/max timing statistics for display.
+
+    Parameters
+    ----------
+    stats : TimingStats | None
+        The statistics to format, or None if there were none.
+
+    Returns
+    -------
+    str
+        A human-readable summary of `stats`.
+    """
+    if stats is None:
+        return 'n/a'
+    return (
+        f'min {_fmt_seconds(stats.minimum)}, '
+        f'median {_fmt_seconds(stats.median)}, '
+        f'max {_fmt_seconds(stats.maximum)}'
+    )
+
+
+def _fmt_bytes(value: float) -> str:
+    """Format a byte count with a sensible unit.
+
+    Parameters
+    ----------
+    value : float
+        A size in bytes.
+
+    Returns
+    -------
+    str
+        `value` formatted in B, KB or MB, whichever reads best.
+    """
+    if value >= 1_000_000:
+        return f'{value / 1_000_000:.1f} MB'
+    if value >= 1_000:
+        return f'{value / 1_000:.1f} KB'
+    return f'{value:,.0f} B'
+
+
+def _fmt_bytes_stats(stats: BytesStats) -> str:
+    """Format min/median/max payload-size statistics for display.
+
+    Parameters
+    ----------
+    stats : BytesStats
+        The statistics to format.
+
+    Returns
+    -------
+    str
+        A human-readable summary of `stats`.
+    """
+    return (
+        f'min {_fmt_bytes(stats.minimum)}, '
+        f'median {_fmt_bytes(stats.median)}, '
+        f'max {_fmt_bytes(stats.maximum)}'
+    )
+
+
 def _print_timing_and_payload(summary: CollectionSummary) -> None:
     """Print timing and payload statistics.
 
@@ -514,17 +726,20 @@ def _print_timing_and_payload(summary: CollectionSummary) -> None:
     summary : CollectionSummary
         The report to print from.
     """
-    print('\n== Timing (seconds) ==')
-    print(f'rtt_s: {summary.rtt}')
-    print(f'skew_s: {summary.skew}')
+    print('\n== Timing ==')
+    print(f'rtt_s: {_fmt_timing(summary.rtt)}')
+    print(f'skew_s: {_fmt_timing(summary.skew)}')
     print('\n== Payload ==')
     for feed, stats in summary.payload_by_feed.items():
-        print(f'{feed}: {stats}')
-    print(f'total bytes: {summary.total_bytes:,}')
+        print(f'{feed}: {_fmt_bytes_stats(stats)}')
+    print(
+        'total payload fetched (uncompressed): '
+        f'{_fmt_bytes(summary.total_bytes)}'
+    )
 
 
 def _print_coverage(summary: CollectionSummary) -> None:
-    """Print coverage gap statistics.
+    """Print coverage gap statistics, within the observed window.
 
     Parameters
     ----------
@@ -532,11 +747,15 @@ def _print_coverage(summary: CollectionSummary) -> None:
         The report to print from.
     """
     coverage = summary.coverage
-    print('\n== Coverage gaps (vehiclepos) ==')
+    shown = coverage.worst[:WORST_GAPS_LIMIT]
+    remaining = coverage.minutes_short - len(shown)
+    print('\n== Coverage gaps (vehiclepos, within window) ==')
     print(f'minutes short of {EXPECTED_PER_MINUTE} polls: '
           f'{coverage.minutes_short:,}')
-    for gap in coverage.worst:
+    for gap in shown:
         print(f'  {gap.minute}: {gap.count} polls')
+    if remaining > 0:
+        print(f'  ... and {remaining:,} more short minutes')
 
 
 def print_report(summary: CollectionSummary, *, date: str) -> None:
@@ -554,6 +773,7 @@ def print_report(summary: CollectionSummary, *, date: str) -> None:
         f'({date}T00:00:00Z to {date}T23:59:59Z, UTC partition; '
         f'this is NOT a Sydney calendar day)'
     )
+    _print_window(summary)
     _print_counts(summary)
     _print_failures(summary)
     _print_timing_and_payload(summary)
@@ -701,7 +921,7 @@ def _fetch_summary(
     )
     repo = CollectionRunRepository(bucket=bucket, session=session)
     rows = repo.fetch_day(date=date)
-    return summarize_day(rows, date=date)
+    return summarize_day(rows)
 
 
 def main(argv: list[str] | None = None) -> int:
