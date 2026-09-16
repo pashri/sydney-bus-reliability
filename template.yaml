@@ -3,19 +3,27 @@ Transform: AWS::Serverless-2016-10-31
 Description: Sydney bus GTFS-Realtime collector
 
 Parameters:
+  # Alarm and budget-overrun notifications both go here.
   AlertEmail:
     Type: String
     Description: Address for collector alarms
+  # SSM parameter holding the TfNSW API key; named so it can be
+  # rotated without a template change.
   ApiKeyParameterName:
     Type: String
     Default: /sydney-bus-reliability/tfnsw-api-key
 
 Globals:
   Function:
+    # arm64 (Graviton) is cheaper per GB-s and every dependency here
+    # is pure Python, so nothing needs compiling for it.
     Runtime: python3.14
     Architectures: [arm64]
 
 Resources:
+  # DeletionPolicy: Retain because collected bus data is
+  # irreplaceable — TfNSW publishes no historical feed, so a week
+  # not collected is gone forever.
   DataBucket:
     Type: AWS::S3::Bucket
     DeletionPolicy: Retain
@@ -33,16 +41,24 @@ Resources:
               SSEAlgorithm: AES256
       LifecycleConfiguration:
         Rules:
+          # 30 days, deliberately not 7: until the Phase 2 compactor
+          # exists, raw/ is the only durable copy of anything, so a
+          # short expiry would silently delete the first week if
+          # Phase 2 slipped. Tighten to 7 once curated/ is durable.
           - Id: ExpireRaw
             Status: Enabled
             Prefix: raw/
             ExpirationInDays: 30
 
+  # Collection runs unattended, including through an international
+  # relocation, so an alarm nobody receives is worthless.
   AlertTopic:
     Type: AWS::SNS::Topic
     Properties:
       TopicName: sydney-bus-reliability-alerts
 
+  # Requires a manual confirmation click before anything can be
+  # delivered to AlertEmail.
   AlertSubscription:
     Type: AWS::SNS::Subscription
     Properties:
@@ -50,6 +66,8 @@ Resources:
       Endpoint: !Ref AlertEmail
       TopicArn: !Ref AlertTopic
 
+  # Declared explicitly so retention is bounded at 30 days rather
+  # than Lambda's implicit never-expiring default.
   CollectorLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
@@ -63,12 +81,25 @@ Resources:
       FunctionName: sydney-bus-reliability-collector
       CodeUri: .
       Handler: src.collector.handler.handler
+      # 256 MB is cost-critical, not a guess: 512 MB roughly triples
+      # the monthly bill by burning the free 400,000 GB-s allowance
+      # twice as fast.
       MemorySize: 256
+      # The last scheduled poll starts at t+50s and needs its HTTP
+      # round trip plus S3 write; the 3s platform default would
+      # break everything. A 65s timeout against a 60s schedule means
+      # invocations overlap by design in steady state, not just on
+      # retries — object keys use actual fetch time, not an intended
+      # slot, because of this.
       Timeout: 65
+      # Caps a runaway retry storm while still permitting the
+      # intended overlap above.
       ReservedConcurrentExecutions: 5
       Environment:
         Variables:
           BUCKET_NAME: !Ref DataBucket
+          # The poll cadence lives here and ONLY here; the handler
+          # reads it with no in-code default and raises without it.
           VEHICLE_OFFSETS_S: '0,10,20,30,40,50'
           API_KEY_PARAMETER_NAME: !Ref ApiKeyParameterName
           POWERTOOLS_SERVICE_NAME: collector
@@ -84,6 +115,10 @@ Resources:
           Properties:
             Schedule: rate(1 minute)
 
+  # TreatMissingData: breaching is the important part below — if the
+  # function stops being invoked there is no metric data at all, and
+  # absent data must read as broken rather than healthy. This is the
+  # alarm that catches total failure.
   CollectorSilentAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
@@ -102,6 +137,8 @@ Resources:
       TreatMissingData: breaching
       AlarmActions: [!Ref AlertTopic]
 
+  # Catches a collector that runs but fails, which the silent alarm
+  # above cannot see.
   CollectorErrorAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
@@ -120,6 +157,9 @@ Resources:
       TreatMissingData: notBreaching
       AlarmActions: [!Ref AlertTopic]
 
+  # $25, not $15: steady state is ~$10, growing ~$0.80/month as
+  # curated parquet accumulates, so $15 would start firing routinely
+  # within months. $25 still catches a runaway loop within days.
   MonthlyBudget:
     Type: AWS::Budgets::Budget
     Properties:
