@@ -503,11 +503,22 @@ def test_collect_writes_run_record_on_unexpected_worker_error(
         json.loads(line) for line in body.decode().splitlines()
     ]
     # One of the three workers crashed before it could hand back a
-    # PollOutcome at all, so only the siblings that completed are
-    # present — and their data must be real, not a placeholder.
-    assert len(records) == len(FAST_SCHEDULE) - 1
-    assert all(record['error'] is None for record in records)
-    assert all(record['body_bytes'] > 0 for record in records)
+    # PollOutcome at all. The audit trail must still hold one line
+    # per scheduled poll: the survivors carry their real data, and
+    # the crashed poll is marked distinctly from both a fetch
+    # failure and a storage failure.
+    assert len(records) == len(FAST_SCHEDULE)
+    survivors = [r for r in records if r['error'] is None]
+    crashed = [r for r in records if r['error'] is not None]
+    assert len(survivors) == len(FAST_SCHEDULE) - 1
+    assert all(r['body_bytes'] > 0 for r in survivors)
+    assert len(crashed) == 1
+    assert crashed[0]['error'] not in (None, 'storage failed')
+    assert crashed[0]['status_code'] is None
+    assert crashed[0]['body_bytes'] == 0
+    assert crashed[0]['feed'] in {
+        Feed.VEHICLE_POSITIONS.value, Feed.TRIP_UPDATES.value,
+    }
 
 
 @responses.activate
@@ -544,8 +555,16 @@ def test_collect_writes_run_record_when_every_worker_crashes(
     records = [
         json.loads(line) for line in body.decode().splitlines()
     ]
-    assert len(records) == 1
-    assert records[0]['error'] is not None
+    # Every worker crashed, but the audit trail must still show one
+    # line per scheduled poll, each attributable to its own feed —
+    # not one anonymous placeholder standing in for all three.
+    assert len(records) == len(FAST_SCHEDULE)
+    assert all(record['error'] is not None for record in records)
+    assert all(record['status_code'] is None for record in records)
+    assert all(record['body_bytes'] == 0 for record in records)
+    assert {record['feed'] for record in records} == {
+        Feed.VEHICLE_POSITIONS.value, Feed.TRIP_UPDATES.value,
+    }
 
 
 @responses.activate
