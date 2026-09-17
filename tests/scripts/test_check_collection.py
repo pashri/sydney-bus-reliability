@@ -1,8 +1,13 @@
 """Tests for the pure summarising logic in check_collection.py."""
 
+from datetime import UTC, datetime
 from http import HTTPStatus
 
-from scripts.check_collection import summarize_day, summarize_memory
+from scripts.check_collection import (
+    CollectionRunRepository,
+    summarize_day,
+    summarize_memory,
+)
 from src.common.types_ import Feed, RunRecord
 
 DATE = '2026-09-15'
@@ -175,6 +180,180 @@ def test_summarize_day_windows_a_partial_day() -> None:
     assert summary.coverage.minutes_short == 1
     vp = summary.feed_counts['vehiclepos']
     assert vp.expected == 5 * 6
+
+
+def _boundary_row(*, second: str) -> RunRecord:
+    """Build one vehiclepos row fetched at 00:00:<second> on
+    `DATE`, as `fetch_boundary_rows` would return it after
+    filtering the previous partition down to rows on `DATE`."""
+    fetched_at = f'{DATE}T00:00:{second}+00:00'
+    return RunRecord(
+        feed=Feed.VEHICLE_POSITIONS.value,
+        fetched_at_utc=fetched_at,
+        received_at_utc=fetched_at,
+        rtt_s=0.2,
+        server_date_utc=fetched_at,
+        skew_s=0.05,
+        status_code=HTTPStatus.OK,
+        body_bytes=1_000,
+        error=None,
+    )
+
+
+def test_summarize_day_midnight_straddle_not_a_gap() -> None:
+    """A full 6 polls split 3-and-3 across midnight is not a gap
+    once the neighbouring partition's boundary rows are supplied."""
+    day_rows = [
+        _row(minute='00:00', second=f'{second:02d}')
+        for second in (0, 10, 20)
+    ]
+    boundary_rows = [
+        _boundary_row(second=f'{second:02d}') for second in (30, 40, 50)
+    ]
+    summary = summarize_day(day_rows, boundary_rows=boundary_rows)
+    short = {gap.minute: gap.count for gap in summary.coverage.worst}
+    assert '00:00' not in short
+    assert summary.coverage.minutes_short == 0
+    vp = summary.feed_counts['vehiclepos']
+    assert vp.actual == 3
+    assert summary.total_bytes == 3_000
+
+
+def test_summarize_day_midnight_genuine_gap_still_detected() -> None:
+    """Only 4 polls total across the midnight boundary is a real
+    gap and must still be reported after stitching."""
+    day_rows = [
+        _row(minute='00:00', second=f'{second:02d}') for second in (0, 10)
+    ]
+    boundary_rows = [_boundary_row(second='50')]
+    summary = summarize_day(day_rows, boundary_rows=boundary_rows)
+    short = {gap.minute: gap.count for gap in summary.coverage.worst}
+    assert short == {'00:00': 3}
+    assert summary.coverage.minutes_short == 1
+
+
+def test_summarize_day_missing_boundary_rows_does_not_error() -> None:
+    """No boundary rows supplied (e.g. neighbouring partition is
+    missing) behaves exactly like the pre-fix path."""
+    rows = _full_minute(minute='00:00')
+    summary = summarize_day(rows, boundary_rows=None)
+    assert summary.coverage.minutes_short == 0
+
+
+class _FakeBody:
+    """Minimal stand-in for a botocore streaming body."""
+
+    def __init__(self, *, data: bytes) -> None:
+        self._data = data
+
+    def read(self) -> bytes:
+        """Return the whole body, matching the real client's API."""
+        return self._data
+
+
+class _FakePaginator:
+    """Stand-in for a boto3 paginator over a fixed set of pages."""
+
+    def __init__(self, *, pages: list[dict[str, object]]) -> None:
+        self._pages = pages
+
+    def paginate(self, **_kwargs: object) -> list[dict[str, object]]:
+        """Return the fixed pages, ignoring the given kwargs."""
+        return self._pages
+
+
+class _FakeS3Client:
+    """Hand-built S3 client fake covering only what the repository
+    calls: listing one partition, and fetching one object."""
+
+    def __init__(
+        self,
+        *,
+        objects_by_date: dict[str, list[tuple[str, datetime]]],
+        bodies: dict[str, str],
+    ) -> None:
+        self._objects_by_date = objects_by_date
+        self._bodies = bodies
+
+    def get_object(self, *, Bucket: str, Key: str) -> dict[str, object]:
+        """Return the fake body registered for `Key`."""
+        del Bucket
+        return {'Body': _FakeBody(data=self._bodies[Key].encode())}
+
+
+def _repository_with(
+    *, objects_by_date: dict[str, list[tuple[str, datetime]]],
+    bodies: dict[str, str],
+) -> CollectionRunRepository:
+    """Build a repository whose S3 client is a hand-built fake.
+
+    Parameters
+    ----------
+    objects_by_date : dict[str, list[tuple[str, datetime]]]
+        Maps ``dt=`` date strings to (key, LastModified) pairs.
+    bodies : dict[str, str]
+        Maps object keys to their raw JSON Lines content.
+
+    Returns
+    -------
+    CollectionRunRepository
+        A repository backed entirely by fakes, no network.
+    """
+    repo = CollectionRunRepository.__new__(CollectionRunRepository)
+    repo.bucket = 'fake-bucket'
+
+    class _Client(_FakeS3Client):
+        def get_paginator(_self, _name: str) -> _FakePaginator:
+            def paginate(**kwargs: object) -> list[dict[str, object]]:
+                prefix = str(kwargs['Prefix'])
+                date = prefix.split('dt=')[1].rstrip('/')
+                contents = [
+                    {'Key': key, 'LastModified': modified}
+                    for key, modified in objects_by_date.get(date, [])
+                ]
+                return [{'Contents': contents}]
+            paginator = _FakePaginator(pages=[])
+            paginator.paginate = paginate
+            return paginator
+
+    repo.client = _Client(objects_by_date=objects_by_date, bodies=bodies)
+    return repo
+
+
+def test_fetch_boundary_rows_only_reads_the_recent_window() -> None:
+    """Objects well before the boundary are listed but never
+    fetched, so they cannot inflate the stitched row count."""
+    early = datetime(2026, 9, 14, 12, 0, tzinfo=UTC)
+    late = datetime(2026, 9, 14, 23, 59, 40, tzinfo=UTC)
+    repo = _repository_with(
+        objects_by_date={
+            '2026-09-14': [
+                ('midday.jsonl', early),
+                ('boundary.jsonl', late),
+            ],
+        },
+        bodies={
+            'midday.jsonl': (
+                '{"feed": "vehiclepos", '
+                '"fetched_at_utc": "2026-09-14T12:00:00+00:00"}\n'
+            ),
+            'boundary.jsonl': (
+                '{"feed": "vehiclepos", '
+                '"fetched_at_utc": "2026-09-15T00:00:10+00:00"}\n'
+            ),
+        },
+    )
+    rows = repo.fetch_boundary_rows(date='2026-09-15')
+    assert [row['fetched_at_utc'] for row in rows] == [
+        '2026-09-15T00:00:10+00:00',
+    ]
+
+
+def test_fetch_boundary_rows_missing_partition_returns_empty() -> None:
+    """No neighbouring partition (e.g. the first collected day)
+    must not raise, just yield nothing to stitch."""
+    repo = _repository_with(objects_by_date={}, bodies={})
+    assert repo.fetch_boundary_rows(date='2026-09-15') == []
 
 
 def _memory_row(

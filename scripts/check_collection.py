@@ -47,6 +47,7 @@ COLLECTOR_FUNCTION_NAME: Final[str] = 'sydney-bus-reliability-collector'
 COLLECTOR_LOG_GROUP: Final[str] = (
     '/aws/lambda/sydney-bus-reliability-collector'
 )
+BOUNDARY_WINDOW: Final[timedelta] = timedelta(minutes=2)
 MEMORY_BIN_MINUTES: Final[int] = 10
 MEMORY_QUERY: Final[str] = (
     'filter @type = "REPORT"\n'
@@ -558,14 +559,24 @@ def _minute_labels(*, window: CollectionWindow) -> list[str]:
 
 
 def _coverage_summary(
-    rows: list[RunRecord], *, window: CollectionWindow,
+    rows: list[RunRecord],
+    *,
+    boundary_rows: list[RunRecord],
+    window: CollectionWindow,
 ) -> CoverageSummary:
     """Find minutes within the window with too few vehiclepos polls.
+
+    `boundary_rows` are stitched in purely to fill out minute
+    counts at the edges of a UTC-midnight-straddling invocation;
+    the window itself is derived from `rows` alone, so this never
+    grows the range of minutes evaluated.
 
     Parameters
     ----------
     rows : list[RunRecord]
         Audit rows for the day.
+    boundary_rows : list[RunRecord]
+        Rows from a neighbouring partition, for gap-filling only.
     window : CollectionWindow
         The observed span of activity. Minutes outside it are not
         evaluated, since the collector was not running then.
@@ -576,7 +587,7 @@ def _coverage_summary(
         How many minutes were short, and the worst offenders.
     """
     vehiclepos = [
-        row for row in rows
+        row for row in rows + boundary_rows
         if row['feed'] == Feed.VEHICLE_POSITIONS.value
     ]
     per_minute = Counter(row['fetched_at_utc'][11:16] for row in vehiclepos)
@@ -590,7 +601,10 @@ def _coverage_summary(
 
 
 def _coverage_for(
-    rows: list[RunRecord], *, window: CollectionWindow | None,
+    rows: list[RunRecord],
+    *,
+    boundary_rows: list[RunRecord],
+    window: CollectionWindow | None,
 ) -> CoverageSummary:
     """Compute coverage gaps, or an empty result with no window.
 
@@ -598,6 +612,8 @@ def _coverage_for(
     ----------
     rows : list[RunRecord]
         Audit rows for the day.
+    boundary_rows : list[RunRecord]
+        Rows from a neighbouring partition, for gap-filling only.
     window : CollectionWindow | None
         The observed span of activity, or None if `rows` is empty.
 
@@ -608,16 +624,27 @@ def _coverage_for(
     """
     if window is None:
         return CoverageSummary(minutes_short=0, worst=[])
-    return _coverage_summary(rows, window=window)
+    return _coverage_summary(rows, boundary_rows=boundary_rows, window=window)
 
 
-def summarize_day(rows: list[RunRecord]) -> CollectionSummary:
+def summarize_day(
+    rows: list[RunRecord], *, boundary_rows: list[RunRecord] | None = None,
+) -> CollectionSummary:
     """Summarise one UTC day's audit rows. Pure, no I/O.
+
+    `boundary_rows` is only used to fill in per-minute vehiclepos
+    counts at a UTC-midnight-straddling invocation; it never
+    contributes to poll totals, payload totals, timing stats or
+    failure counts, which are computed from `rows` alone.
 
     Parameters
     ----------
     rows : list[RunRecord]
         Every audit row for the day, in any order.
+    boundary_rows : list[RunRecord] | None
+        Rows pulled from a neighbouring ``dt=`` partition that
+        fall on this day, for coverage-gap stitching only. None
+        (e.g. a missing neighbouring partition) behaves as empty.
 
     Returns
     -------
@@ -629,6 +656,9 @@ def summarize_day(rows: list[RunRecord]) -> CollectionSummary:
     total_bytes = sum(row['body_bytes'] for row in rows)
     window = _collection_window(rows)
     window_minutes = window.minutes if window else MINUTES_PER_DAY
+    coverage = _coverage_for(
+        rows, boundary_rows=boundary_rows or [], window=window,
+    )
     return CollectionSummary(
         feed_counts=_feed_counts(rows, window_minutes=window_minutes),
         status_counts=_status_counts(rows),
@@ -637,7 +667,7 @@ def summarize_day(rows: list[RunRecord]) -> CollectionSummary:
         skew=_timing_stats(skews),
         payload_by_feed=_payload_by_feed(rows),
         total_bytes=total_bytes,
-        coverage=_coverage_for(rows, window=window),
+        coverage=coverage,
         window=window,
     )
 
@@ -683,6 +713,70 @@ class CollectionRunRepository:
         for page in paginator.paginate(Bucket=self.bucket, Prefix=prefix):
             keys.extend(obj['Key'] for obj in page.get('Contents', []))
         return keys
+
+    def _recent_keys(
+        self, *, date: str, cutoff: datetime,
+    ) -> list[str]:
+        """List one partition's keys with ``LastModified >= cutoff``.
+
+        Listing itself covers the whole partition, which is cheap
+        (keys and metadata only); this bounds which keys go on to
+        be fetched with `_fetch_rows`, so a boundary stitch never
+        downloads a full day's worth of objects.
+
+        Parameters
+        ----------
+        date : str
+            The neighbouring day, as ``YYYY-MM-DD``.
+        cutoff : datetime
+            Only keys last modified at or after this instant are
+            returned.
+
+        Returns
+        -------
+        list[str]
+            Matching S3 keys, possibly empty if the partition does
+            not exist or has nothing recent enough.
+        """
+        prefix = f'curated/collector_run/dt={date}/'
+        paginator = self.client.get_paginator('list_objects_v2')
+        keys: list[str] = []
+        for page in paginator.paginate(Bucket=self.bucket, Prefix=prefix):
+            keys.extend(
+                obj['Key'] for obj in page.get('Contents', [])
+                if obj['LastModified'] >= cutoff
+            )
+        return keys
+
+    def fetch_boundary_rows(self, *, date: str) -> list[RunRecord]:
+        """Fetch the previous day's rows that spill onto `date`.
+
+        An invocation straddling UTC midnight is filed under the
+        earlier day's partition, but some of its rows carry a
+        `fetched_at_utc` on `date`. Only objects modified within
+        `BOUNDARY_WINDOW` of midnight are fetched, for stitching
+        coverage gaps at ``00:00`` — never for `date`'s own totals.
+
+        Parameters
+        ----------
+        date : str
+            The day being analysed, as ``YYYY-MM-DD``.
+
+        Returns
+        -------
+        list[RunRecord]
+            Rows from the previous partition whose `fetched_at_utc`
+            falls on `date`; empty if that partition is missing.
+        """
+        midnight = datetime.strptime(date, '%Y-%m-%d').replace(tzinfo=UTC)
+        previous_date = (midnight - timedelta(days=1)).strftime('%Y-%m-%d')
+        keys = self._recent_keys(
+            date=previous_date, cutoff=midnight - BOUNDARY_WINDOW,
+        )
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+            results = pool.map(lambda key: self._fetch_rows(key=key), keys)
+        rows = [row for batch in results for row in batch]
+        return [row for row in rows if row['fetched_at_utc'][:10] == date]
 
     def _fetch_rows(self, *, key: str) -> list[RunRecord]:
         """Fetch and parse one JSON Lines audit object.
@@ -1295,7 +1389,8 @@ def _fetch_summary(
     )
     repo = CollectionRunRepository(bucket=bucket, session=session)
     rows = repo.fetch_day(date=date)
-    return summarize_day(rows)
+    boundary_rows = repo.fetch_boundary_rows(date=date)
+    return summarize_day(rows, boundary_rows=boundary_rows)
 
 
 def _fetch_memory_summary(
