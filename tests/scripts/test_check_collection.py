@@ -77,6 +77,8 @@ def test_summarize_day_status_counts_by_feed() -> None:
 
 
 def test_summarize_day_counts_error_row() -> None:
+    """A transport failure (no HTTP response at all) is filed as a
+    transport error, not double-booked as a non-200 status too."""
     rows = [
         _row(),
         _row(
@@ -89,11 +91,80 @@ def test_summarize_day_counts_error_row() -> None:
         ),
     ]
     summary = summarize_day(rows)
-    assert summary.failures.error_count == 1
-    assert summary.failures.non_200_count == 1
-    assert summary.failures.null_server_date_count == 1
+    assert summary.failures.transport_error_count == 1
+    assert summary.failures.crashed_count == 0
+    assert summary.failures.non_200_count == 0
+    assert summary.failures.null_server_date_count == 0
     assert len(summary.failures.examples) >= 1
     assert summary.failures.examples[0]['error'] is not None
+
+
+def test_summarize_day_non_200_counted_once() -> None:
+    """A real HTTP failure response is filed as non-200 only."""
+    rows = [
+        _row(
+            minute='00:01',
+            status_code=HTTPStatus.FORBIDDEN,
+            body_bytes=0,
+            server_date_utc=None,
+            error='HTTP 403',
+        ),
+    ]
+    summary = summarize_day(rows)
+    assert summary.failures.non_200_count == 1
+    assert summary.failures.crashed_count == 0
+    assert summary.failures.transport_error_count == 0
+    assert summary.failures.null_server_date_count == 0
+
+
+def test_summarize_day_crash_row_counted_once() -> None:
+    """A crashed poll's placeholder row lands in exactly one
+    failure category, never triple-counted."""
+    rows = [
+        _row(
+            minute='00:01',
+            status_code=None,
+            body_bytes=0,
+            server_date_utc=None,
+            skew_s=None,
+            rtt_s=0.0,
+            error='poll worker crashed unexpectedly',
+        ),
+    ]
+    summary = summarize_day(rows)
+    assert summary.failures.crashed_count == 1
+    assert summary.failures.transport_error_count == 0
+    assert summary.failures.non_200_count == 0
+    assert summary.failures.null_server_date_count == 0
+
+
+def test_status_counts_distinguish_crash_from_transport_error() -> None:
+    """`_status_counts` must not file a crash and a transport
+    failure under the same ``'None'`` key."""
+    rows = [
+        _row(
+            minute='00:01',
+            status_code=None,
+            body_bytes=0,
+            server_date_utc=None,
+            skew_s=None,
+            rtt_s=0.0,
+            error='poll worker crashed unexpectedly',
+        ),
+        _row(
+            minute='00:02',
+            status_code=None,
+            body_bytes=0,
+            server_date_utc=None,
+            skew_s=None,
+            error='ConnectionError: timed out',
+        ),
+    ]
+    summary = summarize_day(rows)
+    by_status = summary.status_counts['vehiclepos']
+    assert by_status.get('crashed') == 1
+    assert by_status.get('transport_error') == 1
+    assert 'None' not in by_status
 
 
 def test_summarize_day_timing_stats_skip_null_skew() -> None:
@@ -219,6 +290,37 @@ def test_summarize_day_midnight_straddle_not_a_gap() -> None:
     assert summary.total_bytes == 3_000
 
 
+def test_summarize_day_midnight_straddle_boundary_error_row_excluded() -> (
+    None
+):
+    """A crashed/errored row stitched in from the boundary partition
+    must be filtered the same way as a same-day row: it must not
+    paper over a genuine boundary gap."""
+    day_rows = [
+        _row(minute='00:00', second=f'{second:02d}')
+        for second in (0, 10, 20)
+    ]
+    boundary_rows = [
+        _boundary_row(second='30'),
+        _boundary_row(second='40'),
+        RunRecord(
+            feed=Feed.VEHICLE_POSITIONS.value,
+            fetched_at_utc=f'{DATE}T00:00:50+00:00',
+            received_at_utc=f'{DATE}T00:00:50+00:00',
+            rtt_s=0.0,
+            server_date_utc=None,
+            skew_s=None,
+            status_code=None,
+            body_bytes=0,
+            error='poll worker crashed unexpectedly',
+        ),
+    ]
+    summary = summarize_day(day_rows, boundary_rows=boundary_rows)
+    short = {gap.minute: gap.count for gap in summary.coverage.worst}
+    assert short == {'00:00': 5}
+    assert summary.coverage.minutes_short == 1
+
+
 def test_summarize_day_midnight_genuine_gap_still_detected() -> None:
     """Only 4 polls total across the midnight boundary is a real
     gap and must still be reported after stitching."""
@@ -230,6 +332,56 @@ def test_summarize_day_midnight_genuine_gap_still_detected() -> None:
     short = {gap.minute: gap.count for gap in summary.coverage.worst}
     assert short == {'00:00': 3}
     assert summary.coverage.minutes_short == 1
+
+
+def test_summarize_day_crash_row_leaves_minute_short() -> None:
+    """A crashed poll's placeholder row carries `feed='vehiclepos'`
+    but produced no S3 object, so it must not count toward
+    coverage: the minute reads short, not complete."""
+    rows = _full_minute(minute='00:00')[:-1] + [
+        _row(
+            minute='00:00',
+            second='50',
+            status_code=None,
+            body_bytes=0,
+            server_date_utc=None,
+            skew_s=None,
+            rtt_s=0.0,
+            error='poll worker crashed unexpectedly',
+        ),
+    ]
+    summary = summarize_day(rows)
+    short_minutes = {gap.minute: gap.count for gap in summary.coverage.worst}
+    assert short_minutes == {'00:00': 5}
+    assert summary.coverage.minutes_short == 1
+
+
+def test_summarize_day_fetch_failure_row_leaves_minute_short() -> None:
+    """A row with `error` set but a non-200 `status_code` also did
+    not produce a stored object, so it must not count either."""
+    rows = _full_minute(minute='00:00')[:-1] + [
+        _row(
+            minute='00:00',
+            second='50',
+            status_code=HTTPStatus.FORBIDDEN,
+            body_bytes=0,
+            server_date_utc=None,
+            error='HTTP 403',
+        ),
+    ]
+    summary = summarize_day(rows)
+    short_minutes = {gap.minute: gap.count for gap in summary.coverage.worst}
+    assert short_minutes == {'00:00': 5}
+    assert summary.coverage.minutes_short == 1
+
+
+def test_summarize_day_six_clean_rows_still_complete() -> None:
+    """A minute of 6 error-free rows still reports as complete."""
+    rows = _full_minute(minute='00:00')
+    summary = summarize_day(rows)
+    covered = {gap.minute for gap in summary.coverage.worst}
+    assert '00:00' not in covered
+    assert summary.coverage.minutes_short == 0
 
 
 def test_summarize_day_missing_boundary_rows_does_not_error() -> None:

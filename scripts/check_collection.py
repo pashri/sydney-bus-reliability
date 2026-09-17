@@ -43,6 +43,7 @@ EXPECTED_PER_MINUTE_BY_FEED: Final[dict[str, int]] = {
     Feed.VEHICLE_POSITIONS.value: 6,
     Feed.TRIP_UPDATES.value: 1,
 }
+CRASH_ERROR: Final[str] = 'poll worker crashed unexpectedly'
 COLLECTOR_FUNCTION_NAME: Final[str] = 'sydney-bus-reliability-collector'
 COLLECTOR_LOG_GROUP: Final[str] = (
     '/aws/lambda/sydney-bus-reliability-collector'
@@ -137,19 +138,29 @@ class TimingStats:
 class FailureSummary:
     """Counts and examples of rows that indicate a lost poll.
 
+    Each row is filed under exactly one of these counts, its most
+    specific failure kind, so a crashed poll (which also carries a
+    non-null ``error`` and a null ``server_date_utc``) is never
+    added to more than one total. See `_failure_category`.
+
     Attributes
     ----------
-    error_count : int
-        Rows with a non-null ``error``.
+    crashed_count : int
+        Rows whose poll worker crashed before ever making a
+        request.
+    transport_error_count : int
+        Rows with a non-null ``error`` and no HTTP response at all
+        (``status_code`` is null), other than a crash.
     non_200_count : int
-        Rows whose ``status_code`` is not HTTP 200.
+        Rows with an HTTP response whose ``status_code`` is not 200.
     null_server_date_count : int
-        Rows with a null ``server_date_utc``.
+        Otherwise-successful rows with a null ``server_date_utc``.
     examples : list[RunRecord]
         A handful of the offending rows, for triage.
     """
 
-    error_count: int
+    crashed_count: int
+    transport_error_count: int
     non_200_count: int
     null_server_date_count: int
     examples: list[RunRecord]
@@ -413,8 +424,45 @@ def _feed_counts(
     }
 
 
+def _failure_category(row: RunRecord) -> str:
+    """Classify one row into its single most specific failure kind.
+
+    Checked in order from most to least specific, so a crashed
+    poll (which also has a non-null ``error`` and a null
+    ``server_date_utc``) is never also read as a transport error or
+    a missing-date anomaly.
+
+    Parameters
+    ----------
+    row : RunRecord
+        One audit row.
+
+    Returns
+    -------
+    str
+        One of ``'crashed'``, ``'transport_error'``, ``'non_200'``,
+        ``'null_server_date'``, or ``'ok'``.
+    """
+    if row['error'] == CRASH_ERROR:
+        return 'crashed'
+    if row['error'] is not None and row['status_code'] is None:
+        return 'transport_error'
+    if row['status_code'] is not None and row['status_code'] != (
+        HTTPStatus.OK
+    ):
+        return 'non_200'
+    if row['server_date_utc'] is None:
+        return 'null_server_date'
+    return 'ok'
+
+
 def _status_counts(rows: list[RunRecord]) -> dict[str, dict[str, int]]:
-    """Tally polls per feed, broken down by HTTP status code.
+    """Tally polls per feed, broken down by outcome.
+
+    A crash and a transport failure both carry ``status_code=None``
+    but are filed under distinct keys (``'crashed'`` versus
+    ``'transport_error'``), so neither is hidden behind a shared
+    ``'None'`` bucket.
 
     Parameters
     ----------
@@ -424,12 +472,18 @@ def _status_counts(rows: list[RunRecord]) -> dict[str, dict[str, int]]:
     Returns
     -------
     dict[str, dict[str, int]]
-        Counts keyed by feed name, then status code as a string.
+        Counts keyed by feed name, then status code (or
+        ``'crashed'``/``'transport_error'``) as a string.
     """
     result: dict[str, dict[str, int]] = {}
     for row in rows:
         by_status = result.setdefault(row['feed'], {})
-        status_key = str(row['status_code'])
+        category = _failure_category(row)
+        status_key = (
+            category
+            if category in ('crashed', 'transport_error')
+            else str(row['status_code'])
+        )
         by_status[status_key] = by_status.get(status_key, 0) + 1
     return result
 
@@ -445,21 +499,19 @@ def _failure_summary(rows: list[RunRecord]) -> FailureSummary:
     Returns
     -------
     FailureSummary
-        Counts and a handful of example rows.
+        Counts and a handful of example rows, each row counted
+        exactly once under its most specific category.
     """
-    errors = [row for row in rows if row['error'] is not None]
-    non_200 = [
-        row for row in rows
-        if row['status_code'] != HTTPStatus.OK
-    ]
-    null_dates = [
-        row for row in rows if row['server_date_utc'] is None
-    ]
-    examples = (errors + non_200 + null_dates)[:EXAMPLE_LIMIT]
+    categories = [_failure_category(row) for row in rows]
+    examples = [
+        row for row, category in zip(rows, categories)
+        if category != 'ok'
+    ][:EXAMPLE_LIMIT]
     return FailureSummary(
-        error_count=len(errors),
-        non_200_count=len(non_200),
-        null_server_date_count=len(null_dates),
+        crashed_count=categories.count('crashed'),
+        transport_error_count=categories.count('transport_error'),
+        non_200_count=categories.count('non_200'),
+        null_server_date_count=categories.count('null_server_date'),
         examples=examples,
     )
 
@@ -571,6 +623,11 @@ def _coverage_summary(
     the window itself is derived from `rows` alone, so this never
     grows the range of minutes evaluated.
 
+    Only rows with no ``error`` count towards a minute's coverage:
+    a row carrying an error, whether a crash placeholder or a
+    fetch failure, never produced a stored S3 object, so counting
+    it would hide a real, permanent loss of data.
+
     Parameters
     ----------
     rows : list[RunRecord]
@@ -589,6 +646,7 @@ def _coverage_summary(
     vehiclepos = [
         row for row in rows + boundary_rows
         if row['feed'] == Feed.VEHICLE_POSITIONS.value
+        and row['error'] is None
     ]
     per_minute = Counter(row['fetched_at_utc'][11:16] for row in vehiclepos)
     gaps = [
@@ -627,6 +685,32 @@ def _coverage_for(
     return _coverage_summary(rows, boundary_rows=boundary_rows, window=window)
 
 
+def _window_and_coverage(
+    rows: list[RunRecord], *, boundary_rows: list[RunRecord] | None,
+) -> tuple[CollectionWindow | None, CoverageSummary]:
+    """Compute the observed window and its coverage summary.
+
+    Parameters
+    ----------
+    rows : list[RunRecord]
+        Audit rows for the day.
+    boundary_rows : list[RunRecord] | None
+        Rows from a neighbouring partition, for gap-filling only.
+        None (e.g. a missing neighbouring partition) behaves as
+        empty.
+
+    Returns
+    -------
+    tuple[CollectionWindow | None, CoverageSummary]
+        The observed window, and coverage gaps within it.
+    """
+    window = _collection_window(rows)
+    coverage = _coverage_for(
+        rows, boundary_rows=boundary_rows or [], window=window,
+    )
+    return window, coverage
+
+
 def summarize_day(
     rows: list[RunRecord], *, boundary_rows: list[RunRecord] | None = None,
 ) -> CollectionSummary:
@@ -654,11 +738,8 @@ def summarize_day(
     rtts = [row['rtt_s'] for row in rows]
     skews = [row['skew_s'] for row in rows if row['skew_s'] is not None]
     total_bytes = sum(row['body_bytes'] for row in rows)
-    window = _collection_window(rows)
+    window, coverage = _window_and_coverage(rows, boundary_rows=boundary_rows)
     window_minutes = window.minutes if window else MINUTES_PER_DAY
-    coverage = _coverage_for(
-        rows, boundary_rows=boundary_rows or [], window=window,
-    )
     return CollectionSummary(
         feed_counts=_feed_counts(rows, window_minutes=window_minutes),
         status_counts=_status_counts(rows),
@@ -773,6 +854,25 @@ class CollectionRunRepository:
         keys = self._recent_keys(
             date=previous_date, cutoff=midnight - BOUNDARY_WINDOW,
         )
+        return self._fetch_boundary_matches(keys=keys, date=date)
+
+    def _fetch_boundary_matches(
+        self, *, keys: list[str], date: str,
+    ) -> list[RunRecord]:
+        """Fetch keys from the previous partition and keep matches.
+
+        Parameters
+        ----------
+        keys : list[str]
+            S3 keys to fetch from the previous partition.
+        date : str
+            The day being analysed, as ``YYYY-MM-DD``.
+
+        Returns
+        -------
+        list[RunRecord]
+            Rows whose `fetched_at_utc` falls on `date`.
+        """
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
             results = pool.map(lambda key: self._fetch_rows(key=key), keys)
         rows = [row for batch in results for row in batch]
@@ -1019,7 +1119,8 @@ def _print_failures(summary: CollectionSummary) -> None:
     """
     failures = summary.failures
     print('\n== Failures ==')
-    print(f'errors: {failures.error_count:,}')
+    print(f'crashed polls: {failures.crashed_count:,}')
+    print(f'transport errors: {failures.transport_error_count:,}')
     print(f'non-200 statuses: {failures.non_200_count:,}')
     print(f'null server_date_utc: {failures.null_server_date_count:,}')
     for example in failures.examples:

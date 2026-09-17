@@ -410,10 +410,15 @@ def _crash_outcome(*, feed: Feed) -> PollOutcome:
     """Build a placeholder outcome for a poll that crashed.
 
     Attributed to its own feed, so the audit trail can say which
-    scheduled poll died rather than only that something did.
-    Distinguishable from both a fetch failure and a storage
-    failure: those carry a real ``status_code`` and ``body_bytes``,
-    this carries neither.
+    scheduled poll died rather than only that something did. Not
+    reliably distinguishable from a transport failure by any typed
+    field: ``fetch_feed``'s transport-failure path also returns
+    ``status_code=None``, ``body=b''`` and (via ``run_record``)
+    ``server_date_utc=None``, ``skew_s=None`` and ``body_bytes=0``,
+    identical to this placeholder on every one of those fields. The
+    only thing that currently tells the two apart is the literal
+    text of ``error``, which is a message meant for humans, not a
+    structural marker a caller should branch on.
 
     Parameters
     ----------
