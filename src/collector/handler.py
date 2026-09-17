@@ -34,7 +34,13 @@ from botocore.exceptions import BotoCoreError, ClientError
 
 from src.common.feeds import fetch_feed
 from src.common.storage import RawFeedRepository, run_record
-from src.common.types_ import CollectionCounts, Feed, FetchResult, RunRecord
+from src.common.types_ import (
+    CRASHED_POLL_ERROR,
+    CollectionCounts,
+    Feed,
+    FetchResult,
+    RunRecord,
+)
 
 logger = Logger()
 
@@ -441,7 +447,7 @@ def _crash_outcome(*, feed: Feed) -> PollOutcome:
             skew_s=None,
             status_code=None,
             body_bytes=0,
-            error='poll worker crashed unexpectedly',
+            error=CRASHED_POLL_ERROR,
         ),
         stored=False,
     )
@@ -501,6 +507,35 @@ def _gather(
     return outcomes
 
 
+def _recover_from_mismatch(
+    *, schedule: list[tuple[float, Feed]], error: ValueError,
+) -> ScheduleError:
+    """Turn a futures/schedule length mismatch into a full crash set.
+
+    Lengths cannot diverge without a caller bug, so this path is
+    defensive: it exists so that a mismatch degrades to "every poll
+    marked crashed" rather than to "no run record at all", which is
+    the one failure the audit trail exists to prevent.
+
+    Parameters
+    ----------
+    schedule : list[tuple[float, Feed]]
+        The schedule that was submitted; used to attribute one
+        crash placeholder to each scheduled poll.
+    error : ValueError
+        The error ``zip(..., strict=True)`` raised.
+
+    Returns
+    -------
+    ScheduleError
+        Carries a crash placeholder for every scheduled poll, so
+        the caller can still write a complete run record.
+    """
+    logger.exception('Futures and schedule length mismatch')
+    outcomes = [_crash_outcome(feed=feed) for _, feed in schedule]
+    return ScheduleError(outcomes=outcomes, cause=error)
+
+
 def run_schedule(
     *,
     schedule: list[tuple[float, Feed]],
@@ -530,9 +565,11 @@ def run_schedule(
     ------
     ScheduleError
         If any worker raised something ``store_one`` did not
-        anticipate. ``fetch_feed`` never raises and ``store_one``
-        already contains ``ClientError`` and ``BotoCoreError``, so
-        this is reserved for a genuinely unenumerated failure.
+        anticipate, or if ``futures`` and ``schedule`` came out of
+        step (see ``_recover_from_mismatch``). ``fetch_feed`` never
+        raises and ``store_one`` already contains ``ClientError``
+        and ``BotoCoreError``, so the first case is reserved for a
+        genuinely unenumerated failure.
     """
     started_at = time.monotonic()
     with ThreadPoolExecutor(max_workers=len(schedule)) as pool:
@@ -542,7 +579,12 @@ def run_schedule(
             context=context,
             pool=pool,
         )
-        return _gather(futures=futures, schedule=schedule)
+        try:
+            return _gather(futures=futures, schedule=schedule)
+        except ValueError as error:
+            raise _recover_from_mismatch(
+                schedule=schedule, error=error,
+            ) from error
 
 
 def record_run(

@@ -5,10 +5,12 @@ from http import HTTPStatus
 
 from scripts.check_collection import (
     CollectionRunRepository,
+    _failure_category,
     summarize_day,
     summarize_memory,
 )
-from src.common.types_ import Feed, RunRecord
+from src.collector.handler import _crash_outcome
+from src.common.types_ import CRASHED_POLL_ERROR, Feed, RunRecord
 
 DATE = '2026-09-15'
 
@@ -136,6 +138,17 @@ def test_summarize_day_crash_row_counted_once() -> None:
     assert summary.failures.transport_error_count == 0
     assert summary.failures.non_200_count == 0
     assert summary.failures.null_server_date_count == 0
+
+
+def test_failure_category_recognises_handlers_crash_marker() -> None:
+    """`_failure_category` must recognise a crash row built by the
+    handler's own `_crash_outcome`, not merely a hand-typed string
+    that happens to match today. Both sides import
+    `CRASHED_POLL_ERROR` from the same place, so they cannot drift
+    apart independently."""
+    outcome = _crash_outcome(feed=Feed.VEHICLE_POSITIONS)
+    assert outcome.record['error'] == CRASHED_POLL_ERROR
+    assert _failure_category(outcome.record) == 'crashed'
 
 
 def test_status_counts_distinguish_crash_from_transport_error() -> None:

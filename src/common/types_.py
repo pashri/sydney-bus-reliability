@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
-from typing import TypedDict
+from typing import Final, TypedDict
 
 
 class Feed(StrEnum):
@@ -29,6 +29,18 @@ class FetchResult:
     status_code: int | None
     body: bytes
     error: str | None
+
+
+CRASHED_POLL_ERROR: Final[str] = 'poll worker crashed unexpectedly'
+"""The ``error`` value a crashed poll's audit row carries.
+
+A wire value, not a message for humans: it is written verbatim
+into stored ``RunRecord`` JSONL rows and read back by
+``scripts/check_collection.py`` to classify historical rows.
+Changing this string changes how *already-written* records are
+interpreted, so it is defined once here and imported everywhere
+it is produced or matched, rather than duplicated as a literal.
+"""
 
 
 class RunRecord(TypedDict):

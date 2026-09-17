@@ -31,6 +31,7 @@ from typing import Final
 import boto3
 from botocore.exceptions import ClientError
 
+from src.common.types_ import CRASHED_POLL_ERROR as CRASH_ERROR
 from src.common.types_ import Feed, RunRecord
 
 DEFAULT_STACK_NAME: Final[str] = 'sydney-bus-reliability'
@@ -43,7 +44,6 @@ EXPECTED_PER_MINUTE_BY_FEED: Final[dict[str, int]] = {
     Feed.VEHICLE_POSITIONS.value: 6,
     Feed.TRIP_UPDATES.value: 1,
 }
-CRASH_ERROR: Final[str] = 'poll worker crashed unexpectedly'
 COLLECTOR_FUNCTION_NAME: Final[str] = 'sydney-bus-reliability-collector'
 COLLECTOR_LOG_GROUP: Final[str] = (
     '/aws/lambda/sydney-bus-reliability-collector'

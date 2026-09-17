@@ -23,6 +23,7 @@ from src.collector.handler import (
     read_offsets,
     record_run,
     run_schedule,
+    submit_polls,
 )
 from src.common.storage import RawFeedRepository
 from src.common.types_ import Feed
@@ -565,6 +566,52 @@ def test_collect_writes_run_record_when_every_worker_crashes(
     assert {record['feed'] for record in records} == {
         Feed.VEHICLE_POSITIONS.value, Feed.TRIP_UPDATES.value,
     }
+
+
+@responses.activate
+def test_collect_writes_run_record_on_schedule_mismatch(
+    _bucket: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A futures/schedule length mismatch still yields a full
+    audit record.
+
+    Lengths cannot diverge without a caller bug, but if `zip`'s
+    `strict=True` ever catches one, the failure mode must not be
+    "no run record at all" — the exact loss the audit trail exists
+    to prevent. The invocation must still fail loudly afterwards.
+    """
+    responses.add(responses.GET, VEHICLE_URL, body=b'vp', status=200)
+    responses.add(responses.GET, TRIP_URL, body=b'tu', status=200)
+
+    def _short_submit_polls(**kwargs):
+        futures = submit_polls(**kwargs)
+        return futures[:-1]
+
+    monkeypatch.setattr(
+        handler_module, 'submit_polls', _short_submit_polls,
+    )
+
+    with pytest.raises(ScheduleError):
+        collect(
+            schedule=FAST_SCHEDULE,
+            api_key='k',
+            repository=RawFeedRepository(bucket=_bucket),
+            invocation_id='req-1',
+        )
+
+    client = boto3.client('s3', region_name=REGION)
+    listing = client.list_objects_v2(
+        Bucket=_bucket, Prefix='curated/collector_run/',
+    )
+    assert listing['KeyCount'] == 1
+    body = client.get_object(
+        Bucket=_bucket, Key=listing['Contents'][0]['Key'],
+    )['Body'].read()
+    records = [
+        json.loads(line) for line in body.decode().splitlines()
+    ]
+    assert len(records) == len(FAST_SCHEDULE)
+    assert all(record['error'] is not None for record in records)
 
 
 @responses.activate
