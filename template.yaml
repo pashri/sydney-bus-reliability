@@ -79,7 +79,7 @@ Resources:
       FunctionName: sydney-bus-reliability-collector
       CodeUri: .
       Handler: src.collector.handler.handler
-      MemorySize: 384  # evening peak measured 160 MB after the fix
+      MemorySize: 256  # three peaks measured 153-160 MB after the fix
       Timeout: 120 # Last poll starts at t+50s; this gives a bit of legroom.
       # No ReservedConcurrentExecutions: account quota of 10 forbids it.
       Environment:
