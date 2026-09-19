@@ -8,7 +8,7 @@ import boto3
 import pytest
 from google.transit import gtfs_realtime_pb2
 
-from src.compactor.handler import handler, partial_key, target_hour
+from compactor.handler import handler, partial_key, target_hour
 
 FETCHED_POSITION: datetime = datetime(2026, 9, 16, 21, 0, 4, tzinfo=UTC)
 FETCHED_TRIP: datetime = datetime(2026, 9, 16, 21, 0, 34, tzinfo=UTC)

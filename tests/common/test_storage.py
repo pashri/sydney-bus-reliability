@@ -7,8 +7,8 @@ from http import HTTPStatus
 
 import boto3
 
-from src.common.storage import RawFeedRepository, raw_key, run_key, run_record
-from src.common.types_ import Feed, FetchResult
+from common.storage import RawFeedRepository, raw_key, run_key, run_record
+from common.types_ import Feed, FetchResult
 
 REGION = 'ap-southeast-2'
 FETCHED_AT = datetime(2026, 9, 15, 14, 23, 7, tzinfo=UTC)

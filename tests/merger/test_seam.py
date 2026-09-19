@@ -17,10 +17,10 @@ from datetime import UTC, datetime
 import duckdb
 from google.transit import gtfs_realtime_pb2
 
-from src.common.parquet import ParquetRepository
-from src.compactor.trip_updates import TRIP_STOP_SCHEMA, TripStopReducer
-from src.merger.handler import configure
-from src.merger.merge_sql import TRIP_STOP_MERGE
+from common.parquet import ParquetRepository
+from compactor.trip_updates import TRIP_STOP_SCHEMA, TripStopReducer
+from merger.handler import configure
+from merger.merge_sql import TRIP_STOP_MERGE
 
 FETCHED: datetime = datetime(2026, 9, 16, 21, 0, 34, tzinfo=UTC)
 SCHEDULED = gtfs_realtime_pb2.TripUpdate.StopTimeUpdate.SCHEDULED

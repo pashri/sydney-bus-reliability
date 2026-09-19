@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from src.common.clock import (
+from common.clock import (
     parse_server_date,
     round_trip_seconds,
     skew_seconds,

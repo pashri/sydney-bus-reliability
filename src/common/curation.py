@@ -6,7 +6,7 @@ from datetime import datetime
 import boto3
 from aws_lambda_powertools import Logger
 
-from src.common.types_ import CurationRecord
+from common.types_ import CurationRecord
 
 logger = Logger()
 

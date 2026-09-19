@@ -12,8 +12,8 @@ import responses
 from aws_lambda_powertools.utilities import parameters
 from botocore.exceptions import ClientError, EndpointConnectionError
 
-from src.collector import handler as handler_module
-from src.collector.handler import (
+from collector import handler as handler_module
+from collector.handler import (
     PollContext,
     ScheduleError,
     collect,
@@ -25,8 +25,8 @@ from src.collector.handler import (
     run_schedule,
     submit_polls,
 )
-from src.common.storage import RawFeedRepository
-from src.common.types_ import Feed
+from common.storage import RawFeedRepository
+from common.types_ import Feed
 
 REGION = 'ap-southeast-2'
 VEHICLE_URL = (

@@ -9,8 +9,8 @@ from scripts.check_collection import (
     summarize_day,
     summarize_memory,
 )
-from src.collector.handler import _crash_outcome
-from src.common.types_ import CRASHED_POLL_ERROR, Feed, RunRecord
+from collector.handler import _crash_outcome
+from common.types_ import CRASHED_POLL_ERROR, Feed, RunRecord
 
 DATE = '2026-09-15'
 

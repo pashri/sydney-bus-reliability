@@ -5,7 +5,7 @@ import zipfile
 
 import pytest
 
-from src.schedule_loader.dimensions import SPECS, Dimension, dimension_batches
+from schedule_loader.dimensions import SPECS, Dimension, dimension_batches
 
 STOPS: str = (
     'stop_id,stop_name,stop_lat,stop_lon,location_type,parent_station\n'

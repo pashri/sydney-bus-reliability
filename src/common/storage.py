@@ -8,8 +8,8 @@ from typing import Final
 import boto3
 from aws_lambda_powertools import Logger
 
-from src.common.clock import round_trip_seconds, skew_seconds
-from src.common.types_ import Feed, FetchResult, RunRecord
+from common.clock import round_trip_seconds, skew_seconds
+from common.types_ import Feed, FetchResult, RunRecord
 
 logger = Logger()
 

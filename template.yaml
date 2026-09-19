@@ -91,8 +91,8 @@ Resources:
         t+0..50s plus 1 trip-updates poll at t+0, each anchored
         to an absolute offset, written to S3 as gzipped protobuf.
       FunctionName: sydney-bus-reliability-collector
-      CodeUri: .
-      Handler: src.collector.handler.handler
+      CodeUri: src/
+      Handler: collector.handler.handler
       MemorySize: 256  # three peaks measured 153-160 MB after the fix
       Timeout: 120 # Last poll starts at t+50s; this gives a bit of legroom.
       # No ReservedConcurrentExecutions: account quota of 10 forbids it.
@@ -199,8 +199,8 @@ Resources:
         is forward-looking, so a day missed here is a timetable lost
         permanently.
       FunctionName: sydney-bus-reliability-schedule-loader
-      CodeUri: .
-      Handler: src.schedule_loader.handler.handler
+      CodeUri: src/
+      Handler: schedule_loader.handler.handler
       MemorySize: 2048  # 502 MiB of members streamed; measure and lower
       Timeout: 300  # 21.5 s download measured on a home connection
       Layers:
@@ -291,8 +291,8 @@ Resources:
         H+1:00, because raw keys carry actual fetch time and a late
         retry can write after the hour boundary.
       FunctionName: sydney-bus-reliability-compactor
-      CodeUri: .
-      Handler: src.compactor.handler.handler
+      CodeUri: src/
+      Handler: compactor.handler.handler
       # Measured 1,527 MB peak on an M4 Pro for the worst hour, before
       # the RecordBatch streaming in positions.py. Lower once a real
       # Graviton2 peak is observed in curation_run.peak_rss_mb.
@@ -399,8 +399,8 @@ Resources:
         measured hour of 30, and finalising at midnight would truncate
         the night's last services.
       FunctionName: sydney-bus-reliability-merger
-      CodeUri: .
-      Handler: src.merger.handler.handler
+      CodeUri: src/
+      Handler: merger.handler.handler
       MemorySize: 2048
       Timeout: 600
       # No ReservedConcurrentExecutions: account quota of 10 forbids it.

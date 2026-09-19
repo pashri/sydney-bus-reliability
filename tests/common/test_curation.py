@@ -5,8 +5,8 @@ from datetime import UTC, datetime
 
 import boto3
 
-from src.common.curation import CurationRepository, curation_key
-from src.common.types_ import CurationJob, CurationRecord
+from common.curation import CurationRepository, curation_key
+from common.types_ import CurationJob, CurationRecord
 
 STARTED: datetime = datetime(2026, 9, 17, 22, 10, tzinfo=UTC)
 

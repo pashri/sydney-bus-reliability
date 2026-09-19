@@ -9,7 +9,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from src.common.parquet import ParquetRepository
+from common.parquet import ParquetRepository
 
 SCHEMA: pa.Schema = pa.schema([
     pa.field('vehicle_id', pa.string()),

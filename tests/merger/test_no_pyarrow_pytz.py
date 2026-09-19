@@ -16,25 +16,25 @@ from typing import Final
 FORBIDDEN: Final[frozenset[str]] = frozenset({'pyarrow', 'pytz'})
 SRC_ROOT: Final[Path] = Path(__file__).resolve().parents[2] / 'src'
 MERGER_MODULES: Final[tuple[str, ...]] = (
-    'src.merger.handler',
-    'src.merger.merge_sql',
+    'merger.handler',
+    'merger.merge_sql',
 )
 
 
 def module_path(*, module: str) -> Path:
-    """Resolve a dotted ``src.*`` module name to its source file.
+    """Resolve a dotted ``*`` module name to its source file.
 
     Parameters
     ----------
     module : str
-        Dotted module name, e.g. ``src.merger.handler``.
+        Dotted module name, e.g. ``merger.handler``.
 
     Returns
     -------
     Path
         The module's source file.
     """
-    return SRC_ROOT.joinpath(*module.split('.')[1:]).with_suffix('.py')
+    return SRC_ROOT.joinpath(*module.split('.')).with_suffix('.py')
 
 
 def imported_names(*, source: str) -> set[str]:
@@ -61,7 +61,7 @@ def imported_names(*, source: str) -> set[str]:
 
 
 def transitive_src_imports(*, roots: tuple[str, ...]) -> set[str]:
-    """Walk the ``src.*`` import graph reachable from a set of modules.
+    """Walk the ``*`` import graph reachable from a set of modules.
 
     Parameters
     ----------
@@ -87,7 +87,7 @@ def transitive_src_imports(*, roots: tuple[str, ...]) -> set[str]:
         all_imports.update(found)
         pending.extend(
             name for name in found
-            if name.startswith('src.') and name not in seen
+            if name.startswith(('merger.', 'common.')) and name not in seen
         )
     return all_imports
 

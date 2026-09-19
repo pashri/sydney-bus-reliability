@@ -7,8 +7,8 @@ from typing import Final
 import requests
 from aws_lambda_powertools import Logger
 
-from src.common.clock import parse_server_date
-from src.common.types_ import Feed, FetchResult
+from common.clock import parse_server_date
+from common.types_ import Feed, FetchResult
 
 logger = Logger()
 

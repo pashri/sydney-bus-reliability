@@ -14,7 +14,7 @@ import boto3
 from aws_lambda_powertools import Logger
 from botocore.exceptions import ClientError
 
-from src.common.types_ import Feed
+from common.types_ import Feed
 
 logger = Logger()
 
@@ -62,7 +62,7 @@ def hour_prefix(*, feed: Feed, hour: datetime) -> str:
 def fetched_at_from_key(*, key: str) -> datetime:
     """Recover the actual fetch time encoded in an object key.
 
-    The inverse of ``raw_key`` in ``src.common.storage``: that
+    The inverse of ``raw_key`` in ``common.storage``: that
     function builds ``raw/<feed>/dt=YYYY-MM-DD/hour=HH/HHMMSS.pb.gz``
     from a UTC ``fetched_at``, and this reads it back.
 

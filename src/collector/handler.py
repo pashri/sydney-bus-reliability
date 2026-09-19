@@ -28,9 +28,9 @@ from aws_lambda_powertools import Logger
 from aws_lambda_powertools.utilities import parameters
 from botocore.exceptions import BotoCoreError, ClientError
 
-from src.common.feeds import fetch_feed
-from src.common.storage import RawFeedRepository, run_record
-from src.common.types_ import (
+from common.feeds import fetch_feed
+from common.storage import RawFeedRepository, run_record
+from common.types_ import (
     CRASHED_POLL_ERROR,
     CollectionCounts,
     Feed,

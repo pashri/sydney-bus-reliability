@@ -7,7 +7,7 @@ from typing import Final
 
 import pytest
 
-from src.common.gtfs_static import member_rows, zip_sha256
+from common.gtfs_static import member_rows, zip_sha256
 
 ROUTES: str = (
     '"route_id","agency_id","route_short_name"\n'

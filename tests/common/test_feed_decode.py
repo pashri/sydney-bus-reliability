@@ -6,7 +6,7 @@ from typing import Final
 import pytest
 from google.transit import gtfs_realtime_pb2
 
-from src.common.feed_decode import decode_feed, optional_enum, optional_field
+from common.feed_decode import decode_feed, optional_enum, optional_field
 
 # field 4 (current_status), varint 99 - a value the bindings do not
 # define

@@ -6,8 +6,8 @@ from http import HTTPStatus
 import requests
 import responses
 
-from src.common.feeds import fetch_feed
-from src.common.types_ import Feed
+from common.feeds import fetch_feed
+from common.types_ import Feed
 
 VEHICLE_URL = (
     'https://api.transport.nsw.gov.au/v1/gtfs/vehiclepos/buses'

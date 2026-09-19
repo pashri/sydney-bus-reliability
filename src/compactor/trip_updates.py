@@ -32,7 +32,7 @@ import pyarrow as pa
 from aws_lambda_powertools import Logger
 from google.transit import gtfs_realtime_pb2
 
-from src.common.feed_decode import optional_enum, optional_field
+from common.feed_decode import optional_enum, optional_field
 
 logger = Logger()
 

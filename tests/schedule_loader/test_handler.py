@@ -11,9 +11,9 @@ import pytest
 import requests
 import responses
 
-from src.common.gtfs_static import StaticBundle
-from src.common.parquet import ParquetRepository
-from src.schedule_loader.handler import (
+from common.gtfs_static import StaticBundle
+from common.parquet import ParquetRepository
+from schedule_loader.handler import (
     fetch_bundle,
     handler,
     latest_sha256,

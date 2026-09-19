@@ -30,8 +30,8 @@ from typing import Final
 import boto3
 from botocore.exceptions import ClientError
 
-from src.common.types_ import CRASHED_POLL_ERROR as CRASH_ERROR
-from src.common.types_ import Feed, RunRecord
+from common.types_ import CRASHED_POLL_ERROR as CRASH_ERROR
+from common.types_ import Feed, RunRecord
 
 DEFAULT_STACK_NAME: Final[str] = 'sydney-bus-reliability'
 MAX_WORKERS: Final[int] = 16  # threads

@@ -37,7 +37,7 @@ limits.
       --name /sydney-bus-reliability/tfnsw-api-key \
       --value '<key>' --type SecureString --region ap-southeast-2
     uv export --no-dev --no-emit-project --no-color \
-      --format requirements-txt -o requirements.txt
+      --format requirements-txt -o src/requirements.txt
     sam build
     sam deploy --guided --parameter-overrides AlertEmail=<address>
 

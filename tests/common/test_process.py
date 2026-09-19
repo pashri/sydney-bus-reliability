@@ -4,7 +4,7 @@ import resource
 
 import pytest
 
-from src.common import process
+from common import process
 
 
 def test_peak_rss_mb_divides_by_1024_on_linux(

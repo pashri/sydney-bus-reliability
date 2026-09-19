@@ -12,17 +12,17 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from src.common.service_day import merge_window
-from src.compactor.positions import POSITION_SCHEMA
-from src.compactor.trip_updates import TRIP_STOP_SCHEMA
-from src.merger.handler import (
+from common.service_day import merge_window
+from compactor.positions import POSITION_SCHEMA
+from compactor.trip_updates import TRIP_STOP_SCHEMA
+from merger.handler import (
     configure,
     handler,
     merge_trip_stops,
     partial_hour_from_key,
     target_service_date,
 )
-from src.schedule_loader.dimensions import SCHEDULED_STOP_TIME_SCHEMA
+from schedule_loader.dimensions import SCHEDULED_STOP_TIME_SCHEMA
 
 
 class _Context:
@@ -72,7 +72,7 @@ def test_merge_collector_run_folds_jsonl_to_parquet(
             }).encode() + b'\n',
         )
     os.environ['BUCKET_NAME'] = _bucket
-    from src.merger.handler import merge_collector_run
+    from merger.handler import merge_collector_run
 
     assert merge_collector_run(
         bucket=_bucket, service_date=date(2026, 9, 17),

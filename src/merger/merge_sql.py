@@ -133,7 +133,7 @@ def build_trip_stop_query(*, dim_source: str | None) -> str:
     Notes
     -----
     Reproduces the wall-clock convention of
-    ``src.common.service_day.scheduled_instant``. The GTFS clock
+    ``common.service_day.scheduled_instant``. The GTFS clock
     offset is added to local midnight and the result localised to
     Sydney, not treated as elapsed seconds from a fixed anchor. The
     two conventions differ across a daylight-saving transition, so

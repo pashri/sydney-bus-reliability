@@ -21,7 +21,7 @@ from typing import Any, Final
 import pyarrow as pa
 from aws_lambda_powertools import Logger
 
-from src.common.gtfs_static import member_rows
+from common.gtfs_static import member_rows
 
 logger = Logger()
 

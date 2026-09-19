@@ -8,12 +8,12 @@ import boto3
 import pytest
 from botocore.exceptions import ClientError
 
-from src.common.raw_read import (
+from common.raw_read import (
     EXPECTED_OBJECTS,
     RawReader,
     fetched_at_from_key,
 )
-from src.common.types_ import Feed
+from common.types_ import Feed
 
 HOUR: datetime = datetime(2026, 9, 16, 21, 0, tzinfo=UTC)
 

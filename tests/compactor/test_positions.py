@@ -5,7 +5,7 @@ from typing import Final
 
 from google.transit import gtfs_realtime_pb2
 
-from src.compactor.positions import PositionDeduper, position_batches
+from compactor.positions import PositionDeduper, position_batches
 
 FETCHED: datetime = datetime(2026, 9, 16, 21, 0, 4, tzinfo=UTC)
 OBSERVED: int = 1789592400

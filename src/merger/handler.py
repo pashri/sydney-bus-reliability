@@ -18,11 +18,11 @@ import duckdb
 from aws_lambda_powertools import Logger
 from aws_lambda_powertools.utilities.typing import LambdaContext
 
-from src.common.curation import CurationRepository
-from src.common.process import peak_rss_mb
-from src.common.service_day import merge_window, service_date_for
-from src.common.types_ import CurationJob, CurationRecord
-from src.merger.merge_sql import POSITION_MERGE, build_trip_stop_query
+from common.curation import CurationRepository
+from common.process import peak_rss_mb
+from common.service_day import merge_window, service_date_for
+from common.types_ import CurationJob, CurationRecord
+from merger.merge_sql import POSITION_MERGE, build_trip_stop_query
 
 logger = Logger()
 
@@ -248,10 +248,10 @@ def expected_hours(
 def partial_hour_from_key(*, key: str) -> datetime:
     """Recover the partitioned hour encoded in a partial object's key.
 
-    The inverse of ``partial_key`` in ``src.compactor.handler``, which
+    The inverse of ``partial_key`` in ``compactor.handler``, which
     builds ``curated/_partial/<table>/dt=YYYY-MM-DD/hour=HH/
     data.parquet``. Do not use ``fetched_at_from_key`` in
-    ``src.common.raw_read`` for these keys. It parses a different
+    ``common.raw_read`` for these keys. It parses a different
     shape, with an ``HHMMSS`` filename rather than an ``hour=HH``
     segment.
 

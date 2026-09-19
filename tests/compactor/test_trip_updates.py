@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 
 from google.transit import gtfs_realtime_pb2
 
-from src.compactor.trip_updates import TripStopReducer
+from compactor.trip_updates import TripStopReducer
 
 FETCHED: datetime = datetime(2026, 9, 16, 21, 0, 34, tzinfo=UTC)
 SCHEDULED = gtfs_realtime_pb2.TripUpdate.StopTimeUpdate.SCHEDULED

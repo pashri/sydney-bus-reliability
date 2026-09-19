@@ -22,10 +22,10 @@ import requests
 from aws_lambda_powertools import Logger
 from aws_lambda_powertools.utilities.typing import LambdaContext
 
-from src.common.gtfs_static import StaticBundle, zip_sha256
-from src.common.parquet import ParquetRepository
-from src.common.types_ import ScheduleCheck
-from src.schedule_loader.dimensions import SPECS, Dimension, dimension_batches
+from common.gtfs_static import StaticBundle, zip_sha256
+from common.parquet import ParquetRepository
+from common.types_ import ScheduleCheck
+from schedule_loader.dimensions import SPECS, Dimension, dimension_batches
 
 logger = Logger()
 

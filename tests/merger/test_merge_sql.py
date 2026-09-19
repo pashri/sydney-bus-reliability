@@ -8,9 +8,9 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from src.compactor.positions import POSITION_SCHEMA
-from src.compactor.trip_updates import TRIP_STOP_SCHEMA
-from src.merger.merge_sql import POSITION_MERGE, TRIP_STOP_MERGE
+from compactor.positions import POSITION_SCHEMA
+from compactor.trip_updates import TRIP_STOP_SCHEMA
+from merger.merge_sql import POSITION_MERGE, TRIP_STOP_MERGE
 
 
 @pytest.fixture

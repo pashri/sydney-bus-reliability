@@ -16,18 +16,18 @@ import boto3
 from aws_lambda_powertools import Logger
 from aws_lambda_powertools.utilities.typing import LambdaContext
 
-from src.common.curation import CurationRepository
-from src.common.feed_decode import decode_feed
-from src.common.parquet import ParquetRepository
-from src.common.process import peak_rss_mb
-from src.common.raw_read import EXPECTED_OBJECTS, RawReader
-from src.common.types_ import CurationJob, CurationRecord, Feed
-from src.compactor.positions import (
+from common.curation import CurationRepository
+from common.feed_decode import decode_feed
+from common.parquet import ParquetRepository
+from common.process import peak_rss_mb
+from common.raw_read import EXPECTED_OBJECTS, RawReader
+from common.types_ import CurationJob, CurationRecord, Feed
+from compactor.positions import (
     POSITION_SCHEMA,
     PositionDeduper,
     position_batches,
 )
-from src.compactor.trip_updates import TRIP_STOP_SCHEMA, TripStopReducer
+from compactor.trip_updates import TRIP_STOP_SCHEMA, TripStopReducer
 
 logger = Logger()
 

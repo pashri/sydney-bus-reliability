@@ -4,7 +4,7 @@ from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
-from src.common.service_day import (
+from common.service_day import (
     SYDNEY,
     merge_window,
     parse_gtfs_time,
