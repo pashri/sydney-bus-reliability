@@ -51,6 +51,12 @@ Resources:
             Status: Enabled
             Prefix: raw/
             ExpirationInDays: 30  # we'll change to 7 after compactor is made
+          - Id: ExpirePartials
+            Status: Enabled
+            Prefix: curated/_partial/
+            # 3 days, not 2: the merger must be re-runnable after a
+            # weekend failure, and two days leaves no margin.
+            ExpirationInDays: 3
 
   AlertTopic:
     Metadata:
@@ -264,6 +270,98 @@ Resources:
       Period: 3600
       EvaluationPeriods: 1
       Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopic]
+
+  CompactorLogGroup:
+    Metadata:
+      Description: Log group for the compactor function, retained 30 days.
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/sydney-bus-reliability-compactor
+      RetentionInDays: 30
+
+  CompactorFunction:
+    Type: AWS::Serverless::Function
+    DependsOn: CompactorLogGroup
+    Properties:
+      Description: >-
+        Compacts the UTC hour that just closed. Fires at H+1:10, not
+        H+1:00, because raw keys carry actual fetch time and a late
+        retry can write after the hour boundary.
+      FunctionName: sydney-bus-reliability-compactor
+      CodeUri: .
+      Handler: src.compactor.handler.handler
+      # Measured 1,527 MB peak on an M4 Pro for the worst hour, before
+      # the RecordBatch streaming in positions.py. Lower once a real
+      # Graviton2 peak is observed in curation_run.peak_rss_mb.
+      MemorySize: 2048
+      Timeout: 600  # 18.2 s measured on an M4 Pro; Graviton2 is slower
+      # No ReservedConcurrentExecutions: account quota of 10 forbids it.
+      Layers:
+        - !Ref PyarrowLayerArn
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref DataBucket
+          POWERTOOLS_SERVICE_NAME: compactor
+          POWERTOOLS_LOG_LEVEL: INFO
+      Policies:
+        - Statement:
+            # Reads raw/ objects, writes curated/_partial/ and
+            # curated/curation_run/. Never deletes: the bucket holds
+            # irreplaceable collected data and is Retain-on-delete.
+            - Effect: Allow
+              Action:
+                - s3:GetObject
+                - s3:PutObject
+              Resource: !Sub '${DataBucket.Arn}/*'
+            - Effect: Allow
+              Action: s3:ListBucket
+              Resource: !GetAtt DataBucket.Arn
+      Events:
+        # A plain rate/cron Schedule, not ScheduleV2: this job is
+        # indifferent to local time, unlike the noon-Sydney schedule
+        # loader, which needs ScheduleV2 for DST safety.
+        HourlyLagged:
+          Type: Schedule
+          Properties:
+            Schedule: cron(10 * * * ? *)
+
+  CompactorSilentAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: No compactor invocations in 3 hours
+      AlarmName: compactor-not-running
+      Namespace: AWS/Lambda
+      MetricName: Invocations
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref CompactorFunction
+      Statistic: Sum
+      Period: 10800
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      AlarmActions: [!Ref AlertTopic]
+
+  # Catches a compactor that runs but fails, which the silent alarm
+  # above cannot see.
+  CompactorErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Compactor invocation errors
+      AlarmName: compactor-erroring
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref CompactorFunction
+      Statistic: Sum
+      Period: 10800
+      EvaluationPeriods: 1
+      Threshold: 2
       ComparisonOperator: GreaterThanOrEqualToThreshold
       TreatMissingData: notBreaching
       AlarmActions: [!Ref AlertTopic]
