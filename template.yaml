@@ -11,6 +11,14 @@ Parameters:
     Description: Name of the SSM SecureString holding the TfNSW API key
     Type: String
     Default: /sydney-bus-reliability/tfnsw-api-key
+  PyarrowLayerArn:
+    Description: >-
+      AWS-managed SDK-for-pandas layer supplying pyarrow. Pinned by
+      version: scripts/check_layer_parity.py asserts the pyarrow inside
+      it matches uv.lock, so bumping this must bump that too.
+    Type: String
+    Default: >-
+      arn:aws:lambda:ap-southeast-2:336392948345:layer:AWSSDKPandas-Python314-Arm64:11
 
 Globals:
   Function:
@@ -162,6 +170,103 @@ Resources:
           Subscribers:
             - SubscriptionType: EMAIL
               Address: !Ref AlertEmail
+
+  ScheduleLoaderLogGroup:
+    Metadata:
+      Description: Log group for the schedule loader, retained 30 days.
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/sydney-bus-reliability-schedule-loader
+      RetentionInDays: 30
+
+  ScheduleLoaderFunction:
+    Type: AWS::Serverless::Function
+    DependsOn: ScheduleLoaderLogGroup
+    Properties:
+      # Runs at noon Sydney, after TfNSW's observed ~10:31 bundle
+      # generation. An 03:00 run would only ever hold the previous
+      # morning's bundle, so a same-day trackwork or reroute push
+      # would never be held during the day it affects.
+      Description: >-
+        Daily static GTFS capture. Hashes the zip bytes and writes a
+        new valid_from snapshot only when content changed. The bundle
+        is forward-looking, so a day missed here is a timetable lost
+        permanently.
+      FunctionName: sydney-bus-reliability-schedule-loader
+      CodeUri: .
+      Handler: src.schedule_loader.handler.handler
+      MemorySize: 2048  # 502 MiB of members streamed; measure and lower
+      Timeout: 300  # 21.5 s download measured on a home connection
+      Layers:
+        - !Ref PyarrowLayerArn
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref DataBucket
+          API_KEY_PARAMETER_NAME: !Ref ApiKeyParameterName
+          POWERTOOLS_SERVICE_NAME: schedule_loader
+          POWERTOOLS_LOG_LEVEL: INFO
+      Policies:
+        - Statement:
+            # Reads prior schedule_check records, writes dimension
+            # snapshots. Never deletes: the bucket holds
+            # irreplaceable collected data and is Retain-on-delete.
+            - Effect: Allow
+              Action:
+                - s3:GetObject
+                - s3:PutObject
+              Resource: !Sub '${DataBucket.Arn}/*'
+            - Effect: Allow
+              Action: s3:ListBucket
+              Resource: !GetAtt DataBucket.Arn
+        - SSMParameterWithSlashPrefixReadPolicy:
+            ParameterName: !Ref ApiKeyParameterName
+      Events:
+        DailyAtNoon:
+          Type: ScheduleV2
+          Properties:
+            ScheduleExpression: cron(0 12 * * ? *)
+            ScheduleExpressionTimezone: Australia/Sydney
+
+  ScheduleLoaderSilentAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: >-
+        No successful schedule loader run in 24 hours. Each missed
+        day is a permanently unrecoverable timetable, so this is the
+        costliest silent failure in the system. 24h rather than the
+        36h originally specified: CloudWatch caps an alarm's total
+        evaluation window (Period x EvaluationPeriods) at 86400s.
+      AlarmName: schedule-loader-not-running
+      Namespace: AWS/Lambda
+      MetricName: Invocations
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref ScheduleLoaderFunction
+      Statistic: Sum
+      Period: 86400
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      AlarmActions: [!Ref AlertTopic]
+
+  ScheduleLoaderErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Schedule loader invocation errors
+      AlarmName: schedule-loader-erroring
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref ScheduleLoaderFunction
+      Statistic: Sum
+      Period: 3600
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopic]
 
 Outputs:
   BucketName:

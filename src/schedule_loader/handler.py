@@ -20,13 +20,16 @@ cannot be verified.
 
 import io
 import json
+import os
 import zipfile
-from datetime import datetime
+from datetime import UTC, datetime
 from http import HTTPStatus
 from typing import Any, Final
 
+import boto3
 import requests
 from aws_lambda_powertools import Logger
+from aws_lambda_powertools.utilities.typing import LambdaContext
 
 from src.common.gtfs_static import StaticBundle, zip_sha256
 from src.common.parquet import ParquetRepository
@@ -243,3 +246,123 @@ def write_dimensions(
                 ),
             )
     return written
+
+
+def read_api_key(*, parameter_name: str, session: boto3.Session) -> str:
+    """Read the TfNSW API key from SSM Parameter Store.
+
+    Parameters
+    ----------
+    parameter_name : str
+        SSM parameter name, which must carry a leading slash.
+    session : boto3.Session
+        Session to create the SSM client from.
+
+    Returns
+    -------
+    str
+        Decrypted API key.
+    """
+    client = session.client('ssm')
+    response = client.get_parameter(
+        Name=parameter_name, WithDecryption=True,
+    )
+    return str(response['Parameter']['Value'])
+
+
+@logger.inject_lambda_context
+def handler(
+    event: dict[str, Any],  # pylint: disable=unused-argument
+    context: LambdaContext,
+) -> ScheduleCheck:
+    """Fetch the static bundle and snapshot it only when it changed.
+
+    Parameters
+    ----------
+    event : dict[str, Any]
+        EventBridge event, unused.
+    context : LambdaContext
+        Lambda context, used for the invocation id.
+
+    Returns
+    -------
+    ScheduleCheck
+        The check record written for this run.
+    """
+    session = boto3.Session()
+    bucket = os.environ['BUCKET_NAME']
+    checked_at = datetime.now(tz=UTC)
+    bundle = fetch_bundle(
+        api_key=read_api_key(
+            parameter_name=os.environ['API_KEY_PARAMETER_NAME'],
+            session=session,
+        ),
+    )
+    client = session.client('s3')
+    previous = latest_sha256(client=client, bucket=bucket)
+    changed = previous != bundle.sha256
+    valid_from = f'{checked_at:%Y-%m-%d}' if changed else None
+    if changed:
+        logger.info(
+            'timetable changed, writing snapshot',
+            extra={'valid_from': valid_from},
+        )
+        write_dimensions(
+            bundle=bundle,
+            repository=ParquetRepository(
+                bucket=bucket, session=session,
+            ),
+            valid_from=str(valid_from),
+        )
+    check = ScheduleCheck(
+        checked_at_utc=checked_at.isoformat(),
+        zip_sha256=bundle.sha256,
+        zip_filename=bundle.filename,
+        changed=changed,
+        valid_from=valid_from,
+    )
+    put_check(
+        client=client,
+        bucket=bucket,
+        check=check,
+        invocation_id=context.aws_request_id,
+    )
+    return check
+
+
+def put_check(
+    *,
+    client: Any,
+    bucket: str,
+    check: ScheduleCheck,
+    invocation_id: str,
+) -> str:
+    """Store one schedule-check record, changed or not.
+
+    Parameters
+    ----------
+    client : Any
+        Boto3 S3 client.
+    bucket : str
+        Destination bucket.
+    check : ScheduleCheck
+        The record to store.
+    invocation_id : str
+        Lambda request id.
+
+    Returns
+    -------
+    str
+        The key written.
+    """
+    key = schedule_check_key(
+        checked_at_iso=check['checked_at_utc'],
+        invocation_id=invocation_id,
+    )
+    client.put_object(
+        Bucket=bucket,
+        Key=key,
+        Body=f'{json.dumps(check)}\n'.encode(),
+        ContentType='application/x-ndjson',
+    )
+    return key

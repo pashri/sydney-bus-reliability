@@ -2,6 +2,7 @@
 
 import io
 import json
+import os
 import zipfile
 from http import HTTPStatus
 
@@ -14,6 +15,7 @@ from src.common.gtfs_static import StaticBundle
 from src.common.parquet import ParquetRepository
 from src.schedule_loader.handler import (
     fetch_bundle,
+    handler,
     latest_sha256,
     read_filename,
     schedule_check_key,
@@ -23,6 +25,17 @@ from src.schedule_loader.handler import (
 BUNDLE_URL: str = (
     'https://api.transport.nsw.gov.au/v1/gtfs/schedule/buses'
 )
+
+
+class _Context:
+    """Minimal Lambda context for Powertools."""
+
+    function_name = 'sydney-bus-reliability-schedule-loader'
+    memory_limit_in_mb = 2048
+    invoked_function_arn = (
+        'arn:aws:lambda:ap-southeast-2:000000000000:function:test'
+    )
+    aws_request_id = 'test-request-id'
 
 
 def build_bundle(*, extra: str = '') -> bytes:
@@ -240,3 +253,69 @@ def test_write_dimensions_raises_on_corrupt_zip(_bucket: str) -> None:
             bundle=bundle, repository=repository,
             valid_from='2026-09-19',
         )
+
+
+@responses.activate
+def test_handler_first_run_writes_snapshot(
+    _bucket: str, _ssm_parameter: str,
+) -> None:
+    """A first-ever run writes dimensions and reports changed."""
+    responses.add(
+        responses.GET, BUNDLE_URL, body=build_bundle(),
+        status=HTTPStatus.OK,
+    )
+    os.environ['BUCKET_NAME'] = _bucket
+    os.environ['API_KEY_PARAMETER_NAME'] = _ssm_parameter
+    result = handler({}, _Context())
+    assert result['changed']
+    assert result['valid_from'] is not None
+
+
+@responses.activate
+def test_handler_unchanged_bundle_writes_no_snapshot(
+    _bucket: str, _ssm_parameter: str,
+) -> None:
+    """Identical bytes produce a check record but no new snapshot.
+
+    This is what protects the meaning of valid_from.
+    """
+    payload = build_bundle()
+    for _ in range(2):
+        responses.add(
+            responses.GET, BUNDLE_URL, body=payload,
+            status=HTTPStatus.OK,
+        )
+    os.environ['BUCKET_NAME'] = _bucket
+    os.environ['API_KEY_PARAMETER_NAME'] = _ssm_parameter
+    handler({}, _Context())
+    second = handler({}, _Context())
+    client = boto3.client('s3')
+    snapshots = client.list_objects_v2(
+        Bucket=_bucket, Prefix='curated/dim_stop/',
+    )['Contents']
+    assert not second['changed']
+    assert second['valid_from'] is None
+    assert len({item['Key'] for item in snapshots}) == 1
+
+
+@responses.activate
+def test_handler_changed_bundle_writes_second_snapshot(
+    _bucket: str, _ssm_parameter: str,
+) -> None:
+    """Changed bytes produce exactly one new valid_from partition."""
+    responses.add(
+        responses.GET, BUNDLE_URL, body=build_bundle(),
+        status=HTTPStatus.OK,
+    )
+    responses.add(
+        responses.GET, BUNDLE_URL,
+        body=build_bundle(
+            extra='"2447_161","2447","161","Maitland","700"\n',
+        ),
+        status=HTTPStatus.OK,
+    )
+    os.environ['BUCKET_NAME'] = _bucket
+    os.environ['API_KEY_PARAMETER_NAME'] = _ssm_parameter
+    handler({}, _Context())
+    second = handler({}, _Context())
+    assert second['changed']

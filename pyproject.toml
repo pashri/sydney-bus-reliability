@@ -7,8 +7,6 @@ dependencies = [
     "aws-lambda-powertools>=3.0",
     "boto3>=1.35",
     "gtfs-realtime-bindings>=1.0",
-    "pyarrow==24.0.0",
-    "duckdb>=1.5",
 ]
 
 [dependency-groups]
@@ -24,6 +22,8 @@ dev = [
     "boto3-stubs[s3]>=1.35",
     "numpydoc>=1.11.0",
     "pyarrow-stubs>=20.0.0.20260819",
+    "pyarrow==24.0.0",
+    "duckdb>=1.5",
 ]
 
 [tool.isort]

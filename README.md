@@ -3,18 +3,24 @@
 [![CI](https://github.com/pashri/sydney-bus-reliability/actions/workflows/ci.yml/badge.svg)](https://github.com/pashri/sydney-bus-reliability/actions/workflows/ci.yml)
 
 Collects Transport for NSW GTFS-Realtime bus feeds, working towards
-measuring how reliable Sydney's buses are. Currently Phase 1: collection
-only — no compaction, schedule loading, analysis or marts yet.
+measuring how reliable Sydney's buses are. Phase 2 in progress: the
+`schedule_loader` Lambda captures the daily static GTFS bundle —
+compaction, analysis and marts are not built yet.
 
 Contains public sector information licensed under the Creative Commons
 Attribution 4.0 licence. Data source: Transport for NSW.
 
 ## Stack
 
-- AWS SAM: one collector Lambda on a 1-minute schedule, one S3 bucket
+- AWS SAM: one collector Lambda on a 1-minute schedule, one schedule
+  loader Lambda on a daily schedule, one S3 bucket
 - Vehicle positions polled every 10 seconds, trip updates every 60
 - Raw protobuf stored gzipped, keyed by actual fetch time, expired after
   30 days
+- Static GTFS bundle fetched daily at 03:00 Australia/Sydney; a new
+  `valid_from` snapshot is written under `curated/` only when its
+  content hash changes, since the bundle is forward-looking and a
+  missed day's timetable cannot be recovered later
 - Python 3.14, managed with uv
 
 ## Deploy

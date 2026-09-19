@@ -1141,19 +1141,19 @@ source = { virtual = "." }
 dependencies = [
     { name = "aws-lambda-powertools" },
     { name = "boto3" },
-    { name = "duckdb" },
     { name = "gtfs-realtime-bindings" },
-    { name = "pyarrow" },
     { name = "requests" },
 ]
 
 [package.dev-dependencies]
 dev = [
     { name = "boto3-stubs", extra = ["s3"] },
+    { name = "duckdb" },
     { name = "isort" },
     { name = "moto", extra = ["s3", "ssm"] },
     { name = "mypy" },
     { name = "numpydoc" },
+    { name = "pyarrow" },
     { name = "pyarrow-stubs" },
     { name = "pylint" },
     { name = "pytest" },
@@ -1166,19 +1166,19 @@ dev = [
 requires-dist = [
     { name = "aws-lambda-powertools", specifier = ">=3.0" },
     { name = "boto3", specifier = ">=1.35" },
-    { name = "duckdb", specifier = ">=1.5" },
     { name = "gtfs-realtime-bindings", specifier = ">=1.0" },
-    { name = "pyarrow", specifier = "==24.0.0" },
     { name = "requests", specifier = ">=2.32" },
 ]
 
 [package.metadata.requires-dev]
 dev = [
     { name = "boto3-stubs", extras = ["s3"], specifier = ">=1.35" },
+    { name = "duckdb", specifier = ">=1.5" },
     { name = "isort", specifier = ">=5.13" },
     { name = "moto", extras = ["s3", "ssm"], specifier = ">=5.0" },
     { name = "mypy", specifier = ">=1.13" },
     { name = "numpydoc", specifier = ">=1.11.0" },
+    { name = "pyarrow", specifier = "==24.0.0" },
     { name = "pyarrow-stubs", specifier = ">=20.0.0.20260819" },
     { name = "pylint", specifier = ">=3.3" },
     { name = "pytest", specifier = ">=8.3" },
