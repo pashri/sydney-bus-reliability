@@ -11,3 +11,6 @@ samconfig.local.toml
 requirements.txt
 *.pb
 *.zip
+
+# Build artefact of scripts/build_duckdb_layer.sh, like requirements.txt.
+layers/duckdb/

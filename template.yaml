@@ -366,6 +366,97 @@ Resources:
       TreatMissingData: notBreaching
       AlarmActions: [!Ref AlertTopic]
 
+  DuckdbLayer:
+    Metadata:
+      Description: >-
+        DuckDB for the merger only. Kept out of the shared
+        requirements because a runtime dependency is bundled into
+        every function's package, which took the schedule loader to
+        416 MB against a 250 MB limit.
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: sydney-bus-reliability-duckdb
+      ContentUri: layers/duckdb
+      CompatibleRuntimes: [python3.14]
+      CompatibleArchitectures: [arm64]
+      RetentionPolicy: Delete
+
+  MergerLogGroup:
+    Metadata:
+      Description: Log group for the merger function, retained 30 days.
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/sydney-bus-reliability-merger
+      RetentionInDays: 30
+
+  MergerFunction:
+    Type: AWS::Serverless::Function
+    DependsOn: MergerLogGroup
+    Properties:
+      Description: >-
+        Assembles one Sydney service day from hourly partials at
+        ~04:00 local. Not midnight: GTFS trips run past midnight to a
+        measured hour of 30, and finalising at midnight would truncate
+        the night's last services.
+      FunctionName: sydney-bus-reliability-merger
+      CodeUri: .
+      Handler: src.merger.handler.handler
+      MemorySize: 2048
+      Timeout: 600
+      # No ReservedConcurrentExecutions: account quota of 10 forbids it.
+      Layers:
+        - !Ref DuckdbLayer
+      # No pyarrow layer. The managed layer (192.1 MB) plus duckdb
+      # (55.1 MB) is 247.5 MB against a 250 MB ceiling - a
+      # coincidence, not a margin. DuckDB reads and writes Parquet
+      # natively without pyarrow, so the merger takes duckdb alone.
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref DataBucket
+          POWERTOOLS_SERVICE_NAME: merger
+          POWERTOOLS_LOG_LEVEL: INFO
+          HOME: /tmp  # duckdb extension cache needs a writable home
+      Policies:
+        - Statement:
+            # Reads curated/collector_run/ and curated/_partial/,
+            # writes curated/fact_*/. Never deletes: the bucket holds
+            # irreplaceable collected data and is Retain-on-delete.
+            - Effect: Allow
+              Action:
+                - s3:GetObject
+                - s3:PutObject
+              Resource: !Sub '${DataBucket.Arn}/*'
+            - Effect: Allow
+              Action: s3:ListBucket
+              Resource: !GetAtt DataBucket.Arn
+      Events:
+        DailyAfterLastTrips:
+          Type: ScheduleV2
+          Properties:
+            ScheduleExpression: cron(0 4 * * ? *)
+            ScheduleExpressionTimezone: Australia/Sydney
+
+  MergerSilentAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: >-
+        No successful merger run in 24 hours. CloudWatch caps an
+        alarm's total evaluation window at 86400s, so the 36h of
+        nightly-plus-slack originally specified is not expressible.
+      AlarmName: merger-not-running
+      Namespace: AWS/Lambda
+      MetricName: Invocations
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref MergerFunction
+      Statistic: Sum
+      Period: 86400
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      AlarmActions: [!Ref AlertTopic]
+
 Outputs:
   BucketName:
     Value: !Ref DataBucket

@@ -13,7 +13,9 @@ dependencies = [
 dev = [
     "pytest>=8.3",
     "pytest-cov>=6.0",
-    "moto[s3,ssm]>=5.0",
+    # [server] pulls in flask: only DuckDB's httpfs tests need a real
+    # local server, since httpfs bypasses the usual mock_aws() patch.
+    "moto[s3,ssm,server]>=5.0",
     "responses>=0.25",
     "mypy>=1.13",
     "pylint>=3.3",
