@@ -1,10 +1,9 @@
 """Sydney service-day arithmetic.
 
-GTFS lets a trip belong to the previous service day while physically
-running past midnight, using an hour field that climbs past 24 — a
-maximum of 30 was measured in the real bundle. Sydney also changes UTC
-offset on 4 October 2026, inside the collection window. Both facts are
-handled here so no caller has to remember either.
+A GTFS trip can belong to one service day while running past midnight.
+Its hour field climbs past 24 to say so, e.g. ``25:15:30`` means 01:15
+the next calendar day. Hour 30 appears in the real bundle. Sydney also
+observes daylight saving, so its UTC offset changes mid-season.
 """
 
 from datetime import UTC, date, datetime, timedelta
@@ -18,8 +17,8 @@ LEAD_MARGIN: Final[timedelta] = timedelta(hours=1)
 TRAIL_MARGIN: Final[timedelta] = timedelta(hours=7)
 """Slack after the Sydney day ends.
 
-Six hours covers the measured maximum GTFS hour of 30, plus one hour of
-the same slack applied at the leading edge.
+Six hours covers the maximum GTFS hour of 30, plus one hour of the same
+slack applied at the leading edge.
 """
 
 
@@ -62,18 +61,13 @@ def scheduled_instant(*, start_date: str, gtfs_time: str) -> datetime:
 
     Notes
     -----
-    This adds the GTFS offset as wall-clock time on top of local
-    midnight, rather than following the GTFS spec's literal wording
-    of "noon minus 12 hours" (elapsed seconds from a fixed anchor).
-    The two conventions agree except across a DST transition, where
-    agencies' own wall-clock scheduling systems make this the one
-    that reproduces the printed timetable.
+    The GTFS offset is added as wall-clock time on top of local
+    midnight. The spec's literal wording is "noon minus 12 hours",
+    i.e. elapsed seconds from a fixed anchor. The two agree except
+    across a daylight-saving transition, where only the wall-clock
+    reading reproduces the printed timetable.
 
-    This has not been confirmed against TfNSW specifically. Trip
-    updates echo the static schedule as an absolute instant on
-    ``NO_DATA`` rows, so comparing those echoes against this function
-    for trips crossing 02:00 on 4 October 2026 settles which
-    convention TfNSW uses.
+    Which convention TfNSW uses is not confirmed.
     """
     midnight = datetime.strptime(start_date, '%Y%m%d').replace(
         tzinfo=SYDNEY,
@@ -84,7 +78,7 @@ def scheduled_instant(*, start_date: str, gtfs_time: str) -> datetime:
 def service_date_for(*, instant: datetime) -> date:
     """Map a UTC instant to the Sydney calendar date containing it.
 
-    This is the calendar date, not the GTFS service date — a trip that
+    This is the calendar date, not the GTFS service date - a trip that
     runs past midnight keeps the service date carried on its own
     ``start_date`` field, which is authoritative and used in preference.
 

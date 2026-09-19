@@ -19,9 +19,9 @@ CONTENT_TYPE: Final[str] = 'application/x-google-protobuf'
 def raw_key(*, feed: Feed, fetched_at: datetime) -> str:
     """Build the S3 key for one raw feed payload.
 
-    The key is derived from the actual fetch time, never from the
-    intended schedule slot, so a late retry files itself honestly
-    instead of overwriting or mislabelling the scheduled poll.
+    The key comes from the actual fetch time, not the intended
+    schedule slot, so a late poll gets its own key instead of
+    overwriting or mislabelling the scheduled one.
 
     Parameters
     ----------
@@ -161,10 +161,9 @@ class RawFeedRepository:
     ) -> str:
         """Store one JSON Lines audit record per invocation.
 
-        Takes already-summarised records rather than ``FetchResult``
-        objects so that the caller can discard each payload as soon
-        as it is stored, instead of holding every body alive until
-        the audit record is written.
+        Takes already-summarised records, not ``FetchResult``
+        objects, so the caller can discard each payload as soon as it
+        is stored.
 
         Parameters
         ----------

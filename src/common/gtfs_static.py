@@ -1,14 +1,13 @@
 """Reading the TfNSW static GTFS bundle without extracting it.
 
-The bundle is 94.7 MiB zipped and 502 MiB extracted, against a default
-Lambda ``/tmp`` of 512 MB — and ``shapes.txt`` alone is 48% of it.
-Members are therefore streamed one at a time straight out of the
-archive, and never written to disk.
+The bundle is about 95 MiB zipped and 500 MiB extracted, so it does not
+fit in a default Lambda ``/tmp``. Members are streamed one at a time
+out of the archive and never written to disk.
 
-The content hash is taken over the zip *bytes*, never the filename: the
-server names each download with a generation timestamp
+Change detection hashes the zip bytes, never the filename. The server
+names each download with a generation timestamp
 (``buses_GTFS_PROD_20260918103100.zip``) that changes on every rebuild
-whether or not anything inside differs.
+whether or not the contents differ.
 """
 
 import csv

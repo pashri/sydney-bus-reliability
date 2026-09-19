@@ -28,9 +28,8 @@ def curation_key(*, started_at: datetime, invocation_id: str) -> str:
 
     Notes
     -----
-    Partitioned by the date the invocation *started*, so a run
-    spanning UTC midnight files with the work it began rather than
-    splitting. ``invocation_id`` keeps the key unique either way.
+    The partition is the date the invocation *started*, so a run
+    spanning UTC midnight files under the day it began.
     """
     return (
         f'curated/curation_run/dt={started_at:%Y-%m-%d}/'

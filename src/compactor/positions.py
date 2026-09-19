@@ -1,10 +1,11 @@
 """Vehicle position extraction and cross-poll dedupe.
 
-The feed refreshes a given vehicle roughly every 10 s but is polled at
-the same cadence, so 28.3% of consecutive samples restate the previous
-timestamp. Most are byte-identical and collapse safely - but 526 per
-peak hour carry the *same* timestamp with a *different* position, so
-the dedupe key must include the position or those real changes vanish.
+The feed refreshes a vehicle about every 10 s and is polled at the same
+cadence, so roughly a quarter of consecutive samples restate the
+previous timestamp. Most are identical and collapse safely. A few
+hundred per peak hour carry the same timestamp with a different
+position, so the dedupe key must include the position or that real
+movement is discarded.
 """
 
 from collections.abc import Iterable, Iterator
@@ -20,7 +21,7 @@ from src.common.feed_decode import optional_enum, optional_field
 
 logger = Logger()
 
-BATCH_SIZE: Final[int] = 20_000
+BATCH_SIZE: Final[int] = 20_000  # rows
 NULL_ISLAND: Final[tuple[float, float]] = (0.0, 0.0)
 
 POSITION_FIELDS: Final[list[pa.Field[Any]]] = [
@@ -141,11 +142,11 @@ def position_record(*, entity: Any, fetched_at: datetime) -> dict[str, Any]:
 class PositionDeduper:
     """Filters vehicle positions for one hour without retaining rows.
 
-    Holds only the keys seen - a full 4-tuple of vehicle id,
-    timestamp, latitude and longitude - so memory scales with
-    distinct observations (~256 bytes each) rather than with row
-    content (778-1,048 bytes each, measured). Accepted rows are
-    yielded immediately by ``rows`` instead of being accumulated.
+    Holds only the keys seen, a 4-tuple of vehicle id, timestamp,
+    latitude and longitude. Latitude and longitude are part of the key
+    because a repeated timestamp does not mean a repeated position.
+    ``rows`` yields accepted rows immediately rather than
+    accumulating them.
     """
 
     def __init__(self) -> None:

@@ -17,9 +17,8 @@ class Feed(StrEnum):
 class FetchResult:
     """The outcome of one attempt to fetch one feed.
 
-    A failed fetch is a result, not an exception: the collector must
-    record failures and carry on, because a raised error would lose the
-    other polls in the same invocation.
+    A failed fetch is a result, not an exception. ``error`` is set and
+    ``body`` is empty.
     """
 
     feed: Feed
@@ -34,23 +33,20 @@ class FetchResult:
 CRASHED_POLL_ERROR: Final[str] = 'poll worker crashed unexpectedly'
 """The ``error`` value a crashed poll's audit row carries.
 
-A wire value, not a message for humans: it is written verbatim
-into stored ``RunRecord`` JSONL rows and read back by
-``scripts/check_collection.py`` to classify historical rows.
-Changing this string changes how *already-written* records are
-interpreted, so it is defined once here and imported everywhere
-it is produced or matched, rather than duplicated as a literal.
+A wire value. It is written verbatim into stored ``RunRecord`` JSONL
+rows and matched on read to classify historical rows, so changing the
+string changes how already-written records are interpreted.
 """
 
 
 class RunRecord(TypedDict):
     """One line of the collector's per-invocation audit log.
 
-    Timestamps are ISO 8601 strings rather than datetimes because this
-    shape is serialised straight to JSON Lines. ``rtt_s`` and ``skew_s``
-    are separate on purpose: round-trip time measures the network, skew
-    measures the clock, and a single combined number would hide which of
-    the two had moved.
+    Timestamps are ISO 8601 strings, not datetimes, because this shape
+    is serialised straight to JSON Lines. ``rtt_s`` is the elapsed
+    time between issuing the request and the response arriving.
+    ``skew_s`` is the estimated difference between the local clock and
+    the server's. They are separate numbers and not interchangeable.
     """
 
     feed: str
@@ -73,7 +69,7 @@ class CollectionCounts(TypedDict):
 
 
 class CurationJob(StrEnum):
-    """One of the three Phase 2 curation Lambdas."""
+    """One of the curation Lambdas."""
 
     SCHEDULE_LOADER = 'schedule_loader'
     COMPACTOR = 'compactor'
@@ -83,14 +79,10 @@ class CurationJob(StrEnum):
 class CurationRecord(TypedDict):
     """One curation invocation's audit row.
 
-    Separate from ``RunRecord`` on purpose: ``collector_run`` answers
-    "was the gap TfNSW or the collector?", and folding curation
-    outcomes into it would make that question unanswerable.
-
-    The three duplicate and unjoined counters exist because the
-    exploration spike measured their rates (526 differing-position
-    duplicates per peak hour, ~0.2% unjoined route ids); recording
-    them keeps drift visible instead of silent.
+    Written to a separate location from ``RunRecord``, which records
+    collection rather than curation. The duplicate and unjoined
+    counters record how many rows were collapsed or failed to join,
+    so drift in those rates stays visible.
     """
 
     job: str
@@ -114,9 +106,8 @@ class CurationRecord(TypedDict):
 class ScheduleCheck(TypedDict):
     """One daily static-GTFS fetch, changed or not.
 
-    Written on every check so that "the timetable did not change
-    between these dates" is an assertion backed by records rather
-    than by absent partitions.
+    Written on every check, whether or not the timetable changed, so
+    an unchanged day has a record rather than an absent partition.
     """
 
     checked_at_utc: str

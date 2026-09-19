@@ -1,11 +1,9 @@
 """Hourly compaction of one UTC hour of raw feed objects.
 
 Ordering is load-bearing. Trip updates are processed and their reducer
-released *before* vehicle positions begin: measured peak RSS is
-1,527 MB that way against 4,007 MB when both are held, and the
-streaming version is marginally *faster*, so there is no trade-off to
-weigh. Getting this wrong quadruples the memory tier - and therefore
-the bill - every hour of every day, while producing identical output.
+released before vehicle positions begin. Holding both at once gives
+identical output, but the most memory used at once goes from about
+1,500 MB to about 4,000 MB.
 """
 
 import os
@@ -73,9 +71,8 @@ def partial_key(*, table: str, hour: datetime) -> str:
     Returns
     -------
     str
-        S3 key under the ``_partial`` prefix, whose leading underscore
-        signals to anyone globbing ``curated/`` that this is an
-        implementation detail rather than a published table.
+        S3 key under the ``_partial`` prefix. The leading underscore
+        marks it as an intermediate, not a published table.
     """
     return (
         f'{PARTIAL_PREFIX}/{table}/dt={hour:%Y-%m-%d}/'
@@ -130,11 +127,9 @@ def position_records(
 ) -> Iterator[dict[str, Any]]:
     """Stream deduplicated position rows across every poll in the hour.
 
-    Rows are never accumulated: the deduper retains only the ~256-byte
-    key per distinct observation, against 778-1,048 bytes for a row
-    dict. At the peak hour's 1,086,002 rows that is the difference
-    between a 1 GB and a 2 GB Lambda tier, paid on 24 invocations a
-    day forever.
+    Rows are never accumulated. The deduper keeps only a small key per
+    distinct observation, so memory scales with the number of
+    observations rather than with row content.
 
     Parameters
     ----------
@@ -267,11 +262,10 @@ def handler(
     Raises
     ------
     RuntimeError
-        If the hour contains no objects at all, which means either a
-        total collection failure or a misaddressed hour. A shortfall
-        short of zero is recorded on the returned record instead: one
-        real gap already exists (20:09 UTC 16 September, lost to an
-        OOM), and raising on every partial hour would page on noise.
+        If the hour contains no objects at all, meaning a total
+        collection failure or a misaddressed hour. A merely short
+        hour does not raise. It is recorded on the returned record,
+        since individual polls can go missing.
     """
     session = boto3.Session()
     bucket = os.environ['BUCKET_NAME']
@@ -280,8 +274,8 @@ def handler(
     reader = RawReader(bucket=bucket, session=session)
     parquet = ParquetRepository(bucket=bucket, session=session)
     # Trip updates first, and the reducer released before positions
-    # begin. See this module's docstring: this ordering is the
-    # difference between a 1,527 MB and a 4,007 MB peak.
+    # begin. See this module's docstring: the ordering roughly
+    # quadruples peak memory if reversed.
     trip = compact_trip_updates(reader=reader, parquet=parquet, hour=hour)
     position = compact_positions(
         reader=reader, parquet=parquet, hour=hour,

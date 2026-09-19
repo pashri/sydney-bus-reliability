@@ -1,14 +1,12 @@
 """Daily assembly of hourly partials into service-day facts.
 
-Runs at ~04:00 Sydney rather than midnight. GTFS lets a trip belong to
-the previous service day while running past midnight - a measured
-maximum hour of 30, i.e. 06:00 the next calendar day - so compacting at
-midnight would finalise a service date before its last trips had
-finished reporting.
+Runs at about 04:00 Sydney, not midnight. A trip can belong to one
+service day while running past midnight, as late as hour 30, i.e.
+06:00 the next calendar day. Merging at midnight would finalise a
+service date before its last trips had finished reporting.
 
-Reads partials across a window computed timezone-aware, because Sydney
-moves from UTC+10 to UTC+11 on 4 October 2026, inside the collection
-window.
+The window of partials to read is computed timezone-aware, since
+Sydney observes daylight saving and the UTC offset changes mid-season.
 """
 
 import os
@@ -34,10 +32,10 @@ PARTIAL_PREFIX: Final[str] = 'curated/_partial'
 class UnmeasuredCurationCounts(TypedDict):
     """The ``CurationRecord`` fields the merger does not measure.
 
-    Unlike the compactor, the merger folds already-curated partials
-    rather than raw feed objects, so these counters have no meaning
-    here. A ``TypedDict`` subset lets it be spread into the full
-    ``CurationRecord`` literal with mypy still checking every key.
+    The merger folds already-curated partials rather than raw feed
+    objects, so these counters have no meaning here. Spreading this
+    subset into a ``CurationRecord`` literal keeps mypy checking
+    every key.
     """
 
     rows_in: int
@@ -104,11 +102,10 @@ def configure(
     connection : duckdb.DuckDBPyConnection
         Connection to configure.
     endpoint : str | None
-        Override S3 endpoint, host[:port] only. A test seam: it is
-        never set in production, where DuckDB talks to real AWS over
-        TLS, and is passed explicitly by tests that run a local moto
-        server, since DuckDB's httpfs makes its own socket
-        connections and so cannot be redirected by ``mock_aws()``.
+        Override S3 endpoint, host[:port] only. A test seam, never
+        set in production. DuckDB's httpfs opens its own sockets, so
+        ``mock_aws()`` cannot intercept it and tests must point it at
+        a real local moto server instead.
     """
     connection.execute('INSTALL httpfs; LOAD httpfs;')
     # icu powers AT TIME ZONE with a named zone, used to resolve
@@ -134,10 +131,10 @@ def merge_collector_run(
 ) -> int:
     """Fold one day of collector JSONL into a Parquet table.
 
-    Written to ``fact_collector_run``, a separate prefix, because the
-    collector keeps writing JSONL to ``collector_run`` and
-    ``check_collection.py`` still reads it. The JSONL gets no lifecycle
-    rule: expiring it would silently shorten the health tool's history.
+    Written to ``fact_collector_run``, a separate prefix. The source
+    JSONL under ``collector_run`` is left in place, because the
+    collector keeps appending to it and ``check_collection.py`` reads
+    it directly.
 
     Parameters
     ----------
@@ -198,11 +195,11 @@ def count_rows(
 def partial_glob(*, bucket: str, table: str) -> str:
     """Build the S3 glob of every hourly partial for one table.
 
-    One glob across all UTC dates, rather than one per date the merge
-    window touches: DuckDB's ``read_parquet`` errors on a glob list
-    entry that matches zero files, which a quiet compactor gap would
-    trigger for no good reason. Narrowing to the service day is left
-    to each merge SQL's own ``WHERE`` clause instead.
+    One glob across all UTC dates, not one per date in the merge
+    window. DuckDB's ``read_parquet`` errors on a glob list entry
+    matching zero files, which a missing hour would trigger.
+    Narrowing to the service day is left to each merge query's own
+    ``WHERE`` clause.
 
     Parameters
     ----------
@@ -253,9 +250,10 @@ def partial_hour_from_key(*, key: str) -> datetime:
 
     The inverse of ``partial_key`` in ``src.compactor.handler``, which
     builds ``curated/_partial/<table>/dt=YYYY-MM-DD/hour=HH/
-    data.parquet``. Not ``fetched_at_from_key`` in
-    ``src.common.raw_read``: that parses a different key shape, with a
-    ``HHMMSS`` filename rather than an ``hour=HH`` segment.
+    data.parquet``. Do not use ``fetched_at_from_key`` in
+    ``src.common.raw_read`` for these keys. It parses a different
+    shape, with an ``HHMMSS`` filename rather than an ``hour=HH``
+    segment.
 
     Parameters
     ----------
@@ -331,9 +329,9 @@ def count_partial_coverage(
 ) -> tuple[int, int]:
     """Compare the partials a merge window implies against what exists.
 
-    A missing hour - a compactor failure, or a partial aged out by the
-    3-day ``ExpirePartials`` lifecycle before the merger ran - must
-    show up as a short day in ``curation_run``, not read as a quiet
+    An hour can go missing through a compactor failure, or because a
+    partial expired before the merger ran. Either way it shows up as
+    a short day in ``curation_run`` rather than reading as a quiet
     night.
 
     Parameters
@@ -418,10 +416,9 @@ def resolve_dim_source(
 ) -> str | None:
     """Locate the schedule snapshot in effect for one service date.
 
-    Only lists S3 prefixes - never fetches dimension rows into
-    Python, so no TIMESTAMPTZ value is ever pulled across the DuckDB
-    boundary. The join happens entirely in SQL, in
-    ``build_trip_stop_query``.
+    Lists S3 prefixes only. No dimension rows are fetched into
+    Python, so no ``TIMESTAMPTZ`` value crosses the DuckDB boundary.
+    The join happens entirely in SQL, in ``build_trip_stop_query``.
 
     Parameters
     ----------
@@ -610,9 +607,8 @@ def build_record(
 def warn_on_short_day(*, coverage: tuple[int, int]) -> None:
     """Log a warning when fewer partials exist than the window implies.
 
-    Never raises: partial data is better than none, and the merger
-    must stay safely re-runnable rather than failing a whole day over
-    one missing hour.
+    Never raises. A missing hour produces a short day, not a failure,
+    and the merge can be re-run later once the partial exists.
 
     Parameters
     ----------
@@ -649,9 +645,8 @@ def handler(
         Lambda context, used for the invocation id.
     endpoint : str | None
         Test-only S3 endpoint override, forwarded to ``configure`` and
-        ``merge_collector_run``. Lambda invokes with two positional
-        arguments only, so this keyword-only default never affects
-        production.
+        ``merge_collector_run``. Lambda invokes the handler with two
+        positional arguments, so this is always None in production.
 
     Returns
     -------

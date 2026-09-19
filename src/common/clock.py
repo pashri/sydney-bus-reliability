@@ -1,9 +1,8 @@
-"""Reconciliation between the feed server's clock and ours.
+"""Comparing the local clock with an HTTP server's clock.
 
-Every delay in this project is a difference between two timestamps. If
-one of them comes from a Lambda whose clock has drifted, the delay is
-wrong and nothing downstream can detect it, so responses are always aged
-against the server's own ``Date`` header.
+A timestamp taken locally can be wrong if the local clock has drifted,
+and the drift is invisible in the timestamp itself. These helpers age a
+response against the server's own ``Date`` header instead.
 """
 
 from datetime import UTC, datetime
@@ -63,10 +62,10 @@ def skew_seconds(
     """Estimate clock skew, corrected for network latency.
 
     The server stamps its ``Date`` somewhere between the request
-    leaving and the response arriving. Comparing it to the midpoint
-    of those two local timestamps removes roughly one leg of the
-    round trip, so what is left is clock difference rather than
-    distance to Sydney.
+    leaving and the response arriving. It is compared against the
+    midpoint of those two local timestamps, which removes roughly one
+    leg of the round trip, leaving clock difference rather than
+    network latency.
 
     Parameters
     ----------

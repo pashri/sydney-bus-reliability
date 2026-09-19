@@ -1,15 +1,19 @@
-"""Decoding GTFS-Realtime payloads without inventing data.
+"""Reading GTFS-Realtime fields that may not have been sent.
 
-Protobuf returns a type default for any field that was never set, so an
-unguarded read of ``current_status`` - which TfNSW never populates -
-yields ``IN_TRANSIT_TO`` for every entity. Measured over one peak hour
-that is 1,086,002 fabricated values. Every optional read therefore goes
-through ``HasField``.
+Reading a protobuf field that was never sent does not fail. It returns
+the field's default, which is indistinguishable from a value the
+publisher really sent. ``current_status`` defaults to ``IN_TRANSIT_TO``
+and TfNSW never sends it, so reading it directly would label every bus
+in every poll as in transit, inventing a value for each one.
 
-``gtfs-realtime-bindings`` ships no stubs and protobuf builds its
-message classes at import, so attribute access on a decoded message
-is unchecked by mypy and pylint alike. A mistyped field name surfaces
-at runtime, not in the gates.
+``HasField`` is the only way to tell "not sent" from "sent, and happens
+to equal the default", so every optional read here goes through it and
+returns ``None`` when the field is absent.
+
+Take that care manually, because the tooling cannot help. Protobuf
+builds its message classes as it imports them and ships no type stubs,
+so neither mypy nor pylint can see these fields. A misspelled field
+name gets past both gates and fails at runtime.
 """
 
 import gzip
@@ -100,13 +104,6 @@ def decode_feed(*, payload: bytes) -> gtfs_realtime_pb2.FeedMessage:
     feed = gtfs_realtime_pb2.FeedMessage()
     try:
         feed.ParseFromString(gzip.decompress(payload))
-    except (
-        DecodeError,
-        # BadGzipFile named for readability; the bare OSError also
-        # catches zlib errors surfaced while decompressing
-        # corrupt-but-gzip-shaped input.
-        gzip.BadGzipFile,
-        OSError,
-    ) as error:
+    except (DecodeError, gzip.BadGzipFile, OSError) as error:
         raise ValueError('unparseable feed payload') from error
     return feed

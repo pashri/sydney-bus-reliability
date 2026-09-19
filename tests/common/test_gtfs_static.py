@@ -112,7 +112,7 @@ def test_member_rows_handles_real_world_field_shapes() -> None:
         '"200015","O\'Riordan St"\n'
     )
     archive = zipfile.ZipFile(io.BytesIO(build_zip(
-        content=f'﻿{body}', name='stops.txt',
+        content=f'\ufeff{body}', name='stops.txt',
     )))
     rows = list(member_rows(archive=archive, name='stops.txt'))
     assert len(rows) == EXPECTED_ROWS

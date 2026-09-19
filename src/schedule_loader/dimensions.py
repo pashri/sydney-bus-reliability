@@ -1,14 +1,14 @@
 """Transforms from static GTFS text rows to dimension record batches.
 
 Every field in the bundle arrives double-quoted, including numerics, so
-type coercion happens here rather than being inferred. Identifiers stay
-strings: ``stop_id`` is 5-7 digits with no fixed width (``200013`` sits
-beside ``2000100``), so treating it as a number would destroy the join.
+types are coerced here rather than inferred. Identifiers stay strings.
+``stop_id`` is 5-7 digits with no fixed width (``200013`` sits beside
+``2000100``), so reading it as a number breaks the join.
 
 ``stop_sequence`` and ``shape_pt_sequence`` are ordinals, not
-identifiers, and are coerced to ``int32``. A string sort orders them
-lexicographically - ``['1', '10', '11', ..., '2', ...]`` - which
-silently zigzags any route with ten or more stops or shape vertices.
+identifiers, and are coerced to ``int32``. As strings they sort
+lexicographically, ``['1', '10', '11', ..., '2', ...]``, which
+silently reorders any route with ten or more stops or shape vertices.
 """
 
 import zipfile
@@ -25,11 +25,11 @@ from src.common.gtfs_static import member_rows
 
 logger = Logger()
 
-BATCH_SIZE: Final[int] = 50_000
+BATCH_SIZE: Final[int] = 50_000  # rows
 """Rows per batch.
 
-Sized so that ``shapes.txt`` at 5,053,423 rows streams in ~100 batches
-rather than materialising 252 MB of Python objects at once.
+``shapes.txt`` holds millions of rows, so it is streamed in batches
+rather than materialised in full.
 """
 
 Row = dict[str, str]
@@ -118,8 +118,8 @@ def trip_record(*, row: Row) -> Record:
     Returns
     -------
     Record
-        Trip identity, including the direction_id neither realtime
-        feed populates and the shape_id the segment map needs.
+        Trip identity. ``direction_id`` comes only from here, as
+        neither realtime feed populates it.
     """
     return {
         'trip_id': row['trip_id'],
@@ -134,8 +134,8 @@ def trip_record(*, row: Row) -> Record:
 def stop_time_record(*, row: Row) -> Record:
     """Build one ``dim_scheduled_stop_time`` record.
 
-    Times are kept as written because the >24:00 convention needs the
-    trip's start_date to resolve, and that lives in ``trips.txt``.
+    Times are kept as written. Resolving the past-24:00 convention
+    needs the trip's ``start_date``, which lives in ``trips.txt``.
 
     Parameters
     ----------

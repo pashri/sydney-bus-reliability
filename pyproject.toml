@@ -13,9 +13,7 @@ dependencies = [
 dev = [
     "pytest>=8.3",
     "pytest-cov>=6.0",
-    # [server] pulls in flask: only DuckDB's httpfs tests need a real
-    # local server, since httpfs bypasses the usual mock_aws() patch.
-    "moto[s3,ssm,server]>=5.0",
+    "moto[s3,ssm,server]>=5.0",  # [server]: httpfs bypasses mock_aws
     "responses>=0.25",
     "mypy>=1.13",
     "pylint>=3.3",
@@ -27,13 +25,7 @@ dev = [
     "pyarrow==24.0.0",
     "duckdb>=1.5",
     "types-protobuf",
-    # Not imported directly: DuckDB requires it to convert
-    # TIMESTAMPTZ columns to tz-aware Python datetimes when a query
-    # result is fetched, which the merge-SQL tests do. Binding a
-    # tz-aware datetime as a query parameter works without it; only
-    # the fetch-back path needs it. The merger itself never fetches
-    # DuckDB results into Python, so this is test-only.
-    "pytz>=2025.1",
+    "pytz>=2025.1",  # DuckDB needs it to fetch TIMESTAMPTZ; tests only
 ]
 
 [tool.isort]
@@ -50,17 +42,11 @@ python_version = "3.14"
 strict = true
 
 [[tool.mypy.overrides]]
-# Generated protobuf code; gtfs-realtime-bindings ships no stubs and
-# types-protobuf does not cover the transit bindings. Scoped to this
-# one module so the protobuf runtime itself stays type-checked.
-module = ["google.transit.*"]
+module = ["google.transit.*"]  # generated protobuf; ships no stubs
 ignore_missing_imports = true
 
 [tool.pylint.typecheck]
-# Protobuf builds message classes dynamically at import, so pylint
-# cannot resolve members such as FeedMessage. Scoped to the generated
-# bindings module only.
-ignored-modules = ["google.transit.gtfs_realtime_pb2"]
+ignored-modules = ["google.transit.gtfs_realtime_pb2"]  # dynamic members
 
 [tool.numpydoc_validation]
 checks = [

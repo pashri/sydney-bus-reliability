@@ -5,10 +5,9 @@ Run locally, read-only, against the live bucket, from the repo root::
 
     uv run python -m scripts.check_collection
 
-Not deployed, and never imported from ``src/``. Summarises one UTC
-``dt=`` partition of ``curated/collector_run`` audit records: poll
-counts, failures, timing, payload sizes, and per-minute coverage
-gaps in the raw ``vehiclepos`` feed.
+Summarises one UTC ``dt=`` partition of ``curated/collector_run``
+audit records: poll counts, failures, timing, payload sizes, and
+per-minute coverage gaps in the raw ``vehiclepos`` feed.
 
 Pass ``--memory`` to also report the Lambda's memory and duration
 envelope for that day, sourced from CloudWatch Logs Insights
@@ -35,11 +34,11 @@ from src.common.types_ import CRASHED_POLL_ERROR as CRASH_ERROR
 from src.common.types_ import Feed, RunRecord
 
 DEFAULT_STACK_NAME: Final[str] = 'sydney-bus-reliability'
-MAX_WORKERS: Final[int] = 16
-EXAMPLE_LIMIT: Final[int] = 5
-WORST_GAPS_LIMIT: Final[int] = 10
-EXPECTED_PER_MINUTE: Final[int] = 6
-MINUTES_PER_DAY: Final[int] = 24 * 60
+MAX_WORKERS: Final[int] = 16  # threads
+EXAMPLE_LIMIT: Final[int] = 5  # examples
+WORST_GAPS_LIMIT: Final[int] = 10  # gaps
+EXPECTED_PER_MINUTE: Final[int] = 6  # objects
+MINUTES_PER_DAY: Final[int] = 24 * 60  # minutes
 EXPECTED_PER_MINUTE_BY_FEED: Final[dict[str, int]] = {
     Feed.VEHICLE_POSITIONS.value: 6,
     Feed.TRIP_UPDATES.value: 1,
@@ -49,15 +48,15 @@ COLLECTOR_LOG_GROUP: Final[str] = (
     '/aws/lambda/sydney-bus-reliability-collector'
 )
 BOUNDARY_WINDOW: Final[timedelta] = timedelta(minutes=2)
-MEMORY_BIN_MINUTES: Final[int] = 10
+MEMORY_BIN_MINUTES: Final[int] = 10  # minutes
 MEMORY_QUERY: Final[str] = (
     'filter @type = "REPORT"\n'
     '| stats max(@maxMemoryUsed)/1000/1000 as maxMB, '
     'max(@duration) as maxDurationMs, count(*) as invocations '
     'by bin(10m)'
 )
-QUERY_POLL_INTERVAL_S: Final[float] = 1.0
-QUERY_TIMEOUT_S: Final[float] = 60.0
+QUERY_POLL_INTERVAL_S: Final[float] = 1.0  # seconds
+QUERY_TIMEOUT_S: Final[float] = 60.0  # seconds
 
 
 @dataclass(frozen=True, slots=True)
@@ -219,7 +218,7 @@ class CollectionSummary:  # pylint: disable=too-many-instance-attributes
         Payload size stats, keyed by feed name.
     total_bytes : int
         Total uncompressed ``body_bytes`` across every row. This
-        is what was fetched, not what is stored — S3 objects are
+        is what was fetched, not what is stored - S3 objects are
         gzipped and considerably smaller.
     coverage : CoverageSummary
         Per-minute coverage of the vehiclepos feed, within the
@@ -328,7 +327,7 @@ class MemorySummary:
         Minutes of bins actually observed. Bins with no REPORT
         lines never appear in the query results, so this is a
         lower bound on the true collection window, not a precise
-        span — enough to flag a partial day.
+        span - enough to flag a partial day.
     """
 
     bins: list[MemoryBin]
@@ -836,7 +835,7 @@ class CollectionRunRepository:
         earlier day's partition, but some of its rows carry a
         `fetched_at_utc` on `date`. Only objects modified within
         `BOUNDARY_WINDOW` of midnight are fetched, for stitching
-        coverage gaps at ``00:00`` — never for `date`'s own totals.
+        coverage gaps at ``00:00`` - never for `date`'s own totals.
 
         Parameters
         ----------
@@ -1409,7 +1408,7 @@ def resolve_bucket(
     stack_name: str,
     session: boto3.Session | None = None,
 ) -> str:
-    """Resolve the collector's bucket name without hardcoding it.
+    """Resolve the collector's S3 bucket name.
 
     Tries, in order: the `bucket_arg` command-line value, the
     ``BUCKET_NAME`` environment variable, then a CloudFormation

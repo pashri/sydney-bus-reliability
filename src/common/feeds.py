@@ -17,7 +17,7 @@ FEED_PATHS: Final[dict[Feed, str]] = {
     Feed.VEHICLE_POSITIONS: 'vehiclepos/buses',
     Feed.TRIP_UPDATES: 'realtime/buses',
 }
-TIMEOUT: Final[float] = 8.0
+TIMEOUT: Final[float] = 8.0  # seconds
 
 
 def feed_url(*, feed: Feed) -> str:

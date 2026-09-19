@@ -1,34 +1,22 @@
-"""Process-level measurement shared by every curation Lambda.
-
-Kept separate from any one Lambda's handler module, because
-``peak_rss_mb`` is ``resource.getrusage`` plus a platform check and has
-nothing to do with any particular Lambda's business logic. Importing it
-from another handler's module couples two Lambdas across a packaging
-boundary and breaks silently if that module is ever refactored.
-"""
+"""How much memory the running process has used."""
 
 import resource
 import sys
 
 
 def peak_rss_mb() -> int:
-    """Report this process's peak resident set size in megabytes.
-
-    Recorded on every curation run because the memory envelope cost
-    Phase 1 the most time, and because a streaming requirement has no
-    guard other than measurement.
+    """Report the most memory this process has used at once, in MB.
 
     Returns
     -------
     int
-        Peak RSS in MB.
+        Peak memory use in MB.
 
     Notes
     -----
-    Linux reports ``ru_maxrss`` in kilobytes; macOS reports it in
-    bytes. Dividing unconditionally by 1024 is roughly 1000x wrong on
-    one of the two platforms, so the divisor is chosen by
-    ``sys.platform``.
+    Linux gives this figure in kilobytes and macOS gives it in bytes,
+    so the same divisor would be about 1000x wrong on one of them. The
+    divisor is picked from ``sys.platform``.
     """
     usage = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     if sys.platform == 'darwin':

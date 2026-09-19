@@ -40,7 +40,7 @@ FAST_SCHEDULE: list[tuple[float, Feed]] = [
 ]
 # Seven polls (six vehicle, one trip) against a pool of only two
 # workers: the shape that exposes chaining through the pool queue.
-# Trip updates is submitted LAST at offset 0.0 — the exact case that
+# Trip updates is submitted LAST at offset 0.0 - the exact case that
 # fired ~40s late in production.
 TIMING_SCHEDULE: list[tuple[float, Feed]] = [
     (0.0, Feed.VEHICLE_POSITIONS),
@@ -129,7 +129,7 @@ class _FlakyUnexpectedRepository(RawFeedRepository):
 class _AlwaysUnexpectedRepository(RawFeedRepository):
     """A repository whose ``put_raw`` always raises unexpectedly.
 
-    Every worker crashes identically — the correlated case an
+    Every worker crashes identically - the correlated case an
     unenumerated bug or a new botocore base class would actually
     produce, as opposed to one poll failing in isolation.
     """
@@ -530,7 +530,7 @@ def test_collect_writes_run_record_when_every_worker_crashes(
 
     An unenumerated exception type is, by construction, something
     that would hit every worker identically rather than one poll in
-    isolation — a code bug or a new botocore base class. Even then,
+    isolation - a code bug or a new botocore base class. Even then,
     "no objects and no audit record" must not be indistinguishable
     from "the collector was never invoked".
     """
@@ -557,7 +557,7 @@ def test_collect_writes_run_record_when_every_worker_crashes(
         json.loads(line) for line in body.decode().splitlines()
     ]
     # Every worker crashed, but the audit trail must still show one
-    # line per scheduled poll, each attributable to its own feed —
+    # line per scheduled poll, each attributable to its own feed -
     # not one anonymous placeholder standing in for all three.
     assert len(records) == len(FAST_SCHEDULE)
     assert all(record['error'] is not None for record in records)
@@ -577,7 +577,7 @@ def test_collect_writes_run_record_on_schedule_mismatch(
 
     Lengths cannot diverge without a caller bug, but if `zip`'s
     `strict=True` ever catches one, the failure mode must not be
-    "no run record at all" — the exact loss the audit trail exists
+    "no run record at all" - the exact loss the audit trail exists
     to prevent. The invocation must still fail loudly afterwards.
     """
     responses.add(responses.GET, VEHICLE_URL, body=b'vp', status=200)
@@ -689,7 +689,7 @@ def test_record_run_handles_empty_results(_bucket: str) -> None:
 def test_poll_outcomes_carry_no_payload_bytes(_bucket: str) -> None:
     """Nothing a worker hands back may retain the payload.
 
-    The audit trail needs ``body_bytes`` — an int — and never the
+    The audit trail needs ``body_bytes`` - an int - and never the
     bytes themselves. If any field of an outcome is ``bytes``, the
     large trip-updates body stays reachable for the whole
     invocation, which is exactly the retention this change removes.
@@ -806,7 +806,7 @@ def test_collect_closes_its_session_on_worker_crash(
 ) -> None:
     """The Session is closed even when a worker crashes.
 
-    A crashing invocation must not leak its Session either — a
+    A crashing invocation must not leak its Session either - a
     crash is exactly when memory pressure is highest.
     """
     responses.add(responses.GET, VEHICLE_URL, body=b'vp', status=200)

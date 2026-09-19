@@ -1,27 +1,26 @@
 """Reduction of trip updates to one row per (trip, stop, stop_sequence).
 
-The key includes ``stop_sequence`` because loop and shuttle routes
-genuinely call the same ``stop_id`` twice on one trip; keying on
-``stop_id`` alone collapses those two real calls into one.
-``stop_sequence`` is 100% populated in the feed (measured), so it is
-safe to use as part of the key.
+The key includes ``stop_sequence``. Loop and shuttle routes really do
+call the same ``stop_id`` twice on one trip, so keying on ``stop_id``
+alone merges two separate calls. ``stop_sequence`` is populated on
+every row in the feed.
 
-Consecutive 60-second polls overlap 99.3%, so almost every poll is a
-full restatement of the last. Measured over one peak hour, 13,041,479
-StopTimeUpdates collapse to 338,825 keys - a 38.5:1 reduction - so the
-reducer holds only the running last value per key, never the inputs.
+Consecutive 60-second polls overlap almost completely, so nearly every
+poll restates the last. Over a peak hour the updates collapse by
+roughly 40:1. The reducer holds only the running last value per key,
+never the inputs.
 
-Three rules, each earned by a measurement:
+Three rules:
 
-1. ``NO_DATA`` rows echo the static timetable verbatim (delay
-   identically 0 on 99.9%, arrival time matching schedule to the exact
-   second on 99.86%). They are not observations, so their values are
-   nulled.
-2. A ``NO_DATA`` observation never overwrites a real one. Absence of
-   information must not displace information, and the ~3% in-progress
-   dropout it represents clusters near end-of-run.
-3. ``n_updates`` counts real observations only, because a trip is
-   listed and echoed every 60 s for hours before it departs.
+1. ``NO_DATA`` rows echo the static timetable rather than reporting
+   anything. Their delay is almost always 0 and their arrival time
+   almost always matches the schedule exactly. They are not
+   observations, so their values are nulled.
+2. A ``NO_DATA`` observation never overwrites a real one. It usually
+   means tracking dropped mid-run, which is not information about the
+   prediction.
+3. ``n_updates`` counts real observations only. A trip is listed and
+   echoed every 60 s for hours before it departs.
 """
 
 from collections.abc import Iterator
@@ -37,7 +36,7 @@ from src.common.feed_decode import optional_enum, optional_field
 
 logger = Logger()
 
-BATCH_SIZE: Final[int] = 20_000
+BATCH_SIZE: Final[int] = 20_000  # rows
 
 StopRelationship = gtfs_realtime_pb2.TripUpdate.StopTimeUpdate
 REAL_RELATIONSHIPS: Final[frozenset[int]] = frozenset({
@@ -114,7 +113,8 @@ def observation_time(*, update: Any, fetched_at: datetime) -> datetime:
     -------
     datetime
         The update's own timestamp when present, else the poll time.
-        TripUpdate.timestamp is populated on only 75.4% of updates.
+        TfNSW leaves ``TripUpdate.timestamp`` unset on many updates, so
+        the fallback is the common case, not an edge case.
     """
     stamp = optional_field(message=update, name='timestamp')
     if stamp:

@@ -1,9 +1,8 @@
 """Reading stored raw feed objects for one UTC hour.
 
-Objects are yielded one at a time and in key order. Both matter:
-streaming keeps peak memory at ~568 MB rather than ~3,076 MB for trip
-updates, and chronological order is what makes a latest-wins reduction
-correct without sorting anything.
+Objects are yielded one at a time and in key order. Key order is
+chronological order, so a latest-wins reduction is correct without any
+sorting.
 """
 
 from collections.abc import Iterator
@@ -26,9 +25,8 @@ EXPECTED_OBJECTS: Final[dict[Feed, int]] = {
 """Objects a complete hour should contain, at the deployed cadence.
 
 Six vehicle-position polls plus one trip-updates poll per minute. A
-shortfall is recorded rather than raised: one real gap exists already
-(three vehicle samples and one trip-updates sample at 20:09 UTC on
-16 September, lost to an OOM before the memory leak was found).
+real hour may hold fewer, since a failed poll leaves a gap that is
+never backfilled.
 """
 
 
@@ -81,8 +79,8 @@ def fetched_at_from_key(*, key: str) -> datetime:
     Raises
     ------
     ValueError
-        If ``key`` does not have the expected shape, naming the
-        offending key rather than raising a bare ``IndexError``.
+        If ``key`` does not have the expected shape. The message
+        names the offending key.
     """
     try:
         parts = key.split('/')
@@ -190,11 +188,10 @@ class RawReader:
         Raises
         ------
         ClientError
-            If the object cannot be fetched, for example because it
-            expired between the LIST and this GET. The key and
-            feed-hour are logged before re-raising, since ``raw/``
-            has a 30-day expiry and a backfill can target an hour
-            that has since aged out.
+            If the object cannot be fetched. The key and feed-hour
+            are logged first. ``raw/`` objects expire, so a listed
+            key can age out before this GET, and a backfill can
+            target an hour that has gone entirely.
         """
         try:
             return self.client.get_object(

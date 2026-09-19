@@ -1,10 +1,7 @@
 """Streaming Parquet writes to S3.
 
-Batches are written through a ``ParquetWriter`` rather than collected
-into one table, because building an Arrow table from a full hour of
-Python row dicts was measured at ~650 MB of row objects plus ~233 MB
-transient — enough on its own to force a larger, permanently more
-expensive memory tier.
+Batches are written one at a time. The whole dataset is never held in
+memory at once.
 """
 
 import io

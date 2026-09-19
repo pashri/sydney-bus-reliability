@@ -1,22 +1,18 @@
 """Collector Lambda: poll the bus feeds and store raw payloads.
 
 Invoked every 60 seconds. Vehicle positions are polled six times at
-10-second offsets to match the feed's own update cadence; trip
-updates once. Because the timeout exceeds the trigger interval,
-invocations overlap by design — object keys carry the actual fetch
-second, so overlap is harmless.
+10-second offsets; trip updates once. The Lambda timeout exceeds the
+trigger interval, so invocations overlap. Object keys carry the
+actual fetch second, so an overlap cannot overwrite anything.
 
-Every poll gets its own thread and sleeps until its own absolute
-offset from invocation start; only the network call itself is gated
-by a semaphore, so a slow or late poll never delays another poll's
-start — it can only ever delay itself.
+Every poll runs on its own thread and sleeps until its own absolute
+offset from invocation start. A semaphore gates only the network
+call, not the waiting, so a slow poll delays only itself.
 
-Each poll also stores its own payload, inside its own worker, as
-soon as the fetch returns and after the semaphore has been
-released. The body is then unreachable and its memory can be
-reused, so peak retention is bounded by the number of concurrent
-polls rather than by the whole schedule. The worker hands back only
-a ``RunRecord`` — counts and timestamps, never bytes.
+Each poll stores its own payload inside its own worker, as soon as
+the fetch returns and after the semaphore has been released. The
+worker hands back only a ``RunRecord``: counts and timestamps, never
+bytes, so payloads are not held alive until the end of the run.
 """
 
 import os
@@ -44,9 +40,9 @@ from src.common.types_ import (
 
 logger = Logger()
 
-TRIP_OFFSET_S: Final[float] = 0.0
-MAX_CONCURRENT_POLLS: Final[int] = 2
-MAX_OFFSET_S: Final[float] = 55.0
+TRIP_OFFSET_S: Final[float] = 0.0  # seconds
+MAX_CONCURRENT_POLLS: Final[int] = 2  # polls
+MAX_OFFSET_S: Final[float] = 55.0  # seconds
 
 _repository_cache: dict[str, RawFeedRepository] = {}
 
@@ -63,10 +59,9 @@ def validate_offset(*, offset: float) -> None:
     ------
     ValueError
         If ``offset`` is negative or at/beyond ``MAX_OFFSET_S``. The
-        Lambda timeout is 65s; an offset at or past that leaves no
-        room to fetch and store, which would otherwise wedge the
-        invocation until Lambda kills it, silently, with no raw
-        objects and no run record.
+        Lambda timeout is 65s, so an offset at or past that leaves no
+        room to fetch and store: the invocation runs until Lambda
+        kills it, with no raw objects and no run record.
     """
     if offset < 0:
         raise ValueError(f'Offset {offset} must not be negative')
@@ -87,9 +82,8 @@ def read_offsets() -> tuple[float, ...]:
     Raises
     ------
     KeyError
-        If ``VEHICLE_OFFSETS_S`` is not set. The cadence lives in
-        ``template.yaml`` and has no in-code default, so that there
-        is exactly one place to change it.
+        If ``VEHICLE_OFFSETS_S`` is not set. It is set in
+        ``template.yaml`` and has no in-code default.
     ValueError
         If the value is not a comma-separated list of numbers, or
         any offset is out of range. See ``validate_offset``.
@@ -121,10 +115,9 @@ def get_repository() -> RawFeedRepository:
     """Build or reuse this execution environment's S3 repository.
 
     ``BUCKET_NAME`` is read on every call, not only on a cache miss,
-    so a missing variable still raises here rather than being
-    masked by an entry a previous invocation already cached. The
-    boto3 client itself is created at most once per bucket per
-    execution environment, instead of once per invocation.
+    so a missing variable still raises rather than being masked by a
+    cached entry. The boto3 client is created at most once per bucket
+    per execution environment.
 
     Returns
     -------
@@ -159,12 +152,7 @@ def poll_schedule() -> list[tuple[float, Feed]]:
 
 @dataclass(frozen=True, slots=True)
 class PollContext:
-    """Resources shared by every poll in one invocation.
-
-    Bundled together so the per-poll functions below take one
-    logical argument for "how to fetch and where to put it" instead
-    of four positional ones, keeping their signatures short.
-    """
+    """Resources shared by every poll in one invocation."""
 
     api_key: str
     session: requests.Session
@@ -176,11 +164,9 @@ class PollContext:
 class PollOutcome:
     """What one poll hands back once its payload is stored.
 
-    Deliberately holds no ``bytes``: the audit trail needs only the
-    payload's length, which ``RunRecord.body_bytes`` already
-    carries. Returning the body here would keep every payload of
-    the invocation alive inside the futures until the very end,
-    which is the retention this design exists to avoid.
+    Holds no ``bytes``. The payload's length is on
+    ``RunRecord.body_bytes``; carrying the body here would keep every
+    payload alive inside the futures until the end of the run.
     """
 
     record: RunRecord
@@ -206,10 +192,9 @@ def store_one(
         storing it failed. A storage failure is logged and reported,
         never raised, so one poll's S3 error cannot abort storage of
         the other polls or the run record. ``BotoCoreError`` covers
-        the transient network family (endpoint, connect and read
-        timeouts, closed connections); ``ClientError`` covers S3
-        rejecting the request itself. Both are contained the same
-        way.
+        transient network faults (endpoint, connect and read
+        timeouts, closed connections) and ``ClientError`` covers S3
+        rejecting the request; both are contained the same way.
     """
     try:
         return repository.put_raw(result=result), False
@@ -255,12 +240,9 @@ def poll_at(
 ) -> FetchResult:
     """Wait until an absolute offset, then fetch once.
 
-    The offset is measured from invocation start, never from the
-    end of a prior poll, so a slow poll delays only itself and never
-    pushes back the start of the next scheduled poll. Each poll runs
-    on its own thread; the semaphore bounds only the concurrent
-    network calls, not the waiting, so it never reintroduces
-    chaining between polls.
+    The offset is measured from invocation start, not from the end
+    of a prior poll, so a slow poll delays only itself. The semaphore
+    bounds the concurrent network calls, not the waiting.
 
     Parameters
     ----------
@@ -299,18 +281,14 @@ def poll_and_store(
 ) -> PollOutcome:
     """Fetch one feed at its offset and store it straight away.
 
-    Storing here, in the poll's own worker, is what keeps peak
-    memory bounded by the number of concurrent polls instead of by
-    the whole schedule: ``result`` dies with this frame, so the body
-    becomes collectable the moment the store returns. It also
-    spreads the S3 writes across the invocation rather than
-    clustering them after the last poll.
+    ``result`` dies with this frame, so the body is collectable as
+    soon as the store returns, and the S3 writes spread across the
+    invocation instead of clustering after the last poll.
 
-    The store runs *outside* ``poll_at``'s semaphore, which
-    ``poll_at`` has already released by the time it returns. Holding
-    the semaphore across an S3 write would queue later polls behind
-    a slow upload and reintroduce the chaining bug that made trip
-    updates fire ~40s late.
+    The store runs outside ``poll_at``'s semaphore, which ``poll_at``
+    has already released by the time it returns. Holding the
+    semaphore across an S3 write queues later polls behind a slow
+    upload; that once made trip updates fire about 40s late.
 
     Parameters
     ----------
@@ -354,9 +332,8 @@ def submit_polls(
 ) -> list[Future[PollOutcome]]:
     """Submit every poll in the schedule to the pool at once.
 
-    Submitting all of them up front, rather than one at a time, is
-    what lets each poll's wait run concurrently with the others
-    instead of queueing behind them.
+    All polls are submitted up front, so each poll's wait runs
+    concurrently with the others instead of queueing behind them.
 
     Parameters
     ----------
@@ -415,16 +392,13 @@ class ScheduleError(Exception):
 def _crash_outcome(*, feed: Feed) -> PollOutcome:
     """Build a placeholder outcome for a poll that crashed.
 
-    Attributed to its own feed, so the audit trail can say which
-    scheduled poll died rather than only that something did. Not
-    reliably distinguishable from a transport failure by any typed
-    field: ``fetch_feed``'s transport-failure path also returns
-    ``status_code=None``, ``body=b''`` and (via ``run_record``)
-    ``server_date_utc=None``, ``skew_s=None`` and ``body_bytes=0``,
-    identical to this placeholder on every one of those fields. The
-    only thing that currently tells the two apart is the literal
-    text of ``error``, which is a message meant for humans, not a
-    structural marker a caller should branch on.
+    The placeholder is attributed to its own feed, so the audit trail
+    says which scheduled poll died. No typed field tells a crash
+    apart from a transport failure: ``fetch_feed``'s transport-failure
+    path also gives ``status_code=None``, ``body=b''`` and, via
+    ``run_record``, ``server_date_utc=None``, ``skew_s=None`` and
+    ``body_bytes=0``. Only the text of ``error`` differs, and that is
+    a human-readable message, not a marker to branch on.
 
     Parameters
     ----------
@@ -482,12 +456,11 @@ def _gather(
     ------
     ScheduleError
         If any future raised. Every failing future is logged, not
-        only the one whose exception is ultimately raised, so a
-        second or third failure is never discarded silently. The
-        exception is stripped of its traceback before it is kept,
-        since that traceback's frames (``poll_and_store``'s local
-        ``result``) would otherwise hold the fetched body alive for
-        the rest of the invocation.
+        only the one whose exception is raised. The exception is
+        stripped of its traceback before it is kept: those frames
+        include ``poll_and_store``'s local ``result``, which would
+        otherwise hold the fetched body alive for the rest of the
+        invocation.
     """
     outcomes: list[PollOutcome] = []
     first_error: BaseException | None = None
@@ -512,10 +485,8 @@ def _recover_from_mismatch(
 ) -> ScheduleError:
     """Turn a futures/schedule length mismatch into a full crash set.
 
-    Lengths cannot diverge without a caller bug, so this path is
-    defensive: it exists so that a mismatch degrades to "every poll
-    marked crashed" rather than to "no run record at all", which is
-    the one failure the audit trail exists to prevent.
+    A mismatch means a caller bug. It degrades to "every poll marked
+    crashed" so that a run record is still written.
 
     Parameters
     ----------
@@ -543,10 +514,9 @@ def run_schedule(
 ) -> list[PollOutcome]:
     """Fire every poll in the schedule at its own absolute offset.
 
-    One thread per poll, so a poll waiting on its offset (or blocked
-    on the semaphore behind an in-flight request) never occupies a
-    slot that another poll needs in order to start waiting on its
-    own offset.
+    One thread per poll. A poll waiting on its offset, or blocked on
+    the semaphore, never occupies a slot another poll needs to start
+    waiting on its own offset.
 
     Parameters
     ----------
@@ -567,9 +537,9 @@ def run_schedule(
         If any worker raised something ``store_one`` did not
         anticipate, or if ``futures`` and ``schedule`` came out of
         step (see ``_recover_from_mismatch``). ``fetch_feed`` never
-        raises and ``store_one`` already contains ``ClientError``
-        and ``BotoCoreError``, so the first case is reserved for a
-        genuinely unenumerated failure.
+        raises and ``store_one`` contains ``ClientError`` and
+        ``BotoCoreError``, so the first case covers only an
+        unenumerated failure.
     """
     started_at = time.monotonic()
     with ThreadPoolExecutor(max_workers=len(schedule)) as pool:
@@ -595,13 +565,11 @@ def record_run(
 ) -> CollectionCounts:
     """Write the invocation's audit record and tally the outcomes.
 
-    The payloads themselves are already stored by this point, each
-    by its own poll. What remains is the one record that answers
-    "was the gap TfNSW or me?", and it is written even when every
-    poll failed to fetch or to store — or crashed outright, since
-    ``_gather`` already turns a crashed poll into a placeholder
-    outcome for its own feed, so ``results`` always has one entry
-    per scheduled poll unless the schedule itself was empty.
+    The payloads are already stored by this point, each by its own
+    poll. The run record is written even when every poll failed to
+    fetch, failed to store, or crashed: ``_gather`` turns a crashed
+    poll into a placeholder outcome, so ``results`` has one entry per
+    scheduled poll unless the schedule was empty.
 
     Parameters
     ----------
@@ -645,9 +613,6 @@ def collect(
 ) -> CollectionCounts:
     """Run one full collection round against a given schedule.
 
-    The schedule is a parameter rather than a module constant so
-    tests can supply a fast one without patching module state.
-
     Parameters
     ----------
     schedule : list[tuple[float, Feed]]
@@ -671,8 +636,7 @@ def collect(
         If a poll worker raised something unanticipated. The run
         record for every poll that did complete is written in a
         ``finally`` block before this propagates, so the invocation
-        still fails loudly (the error alarm fires) without losing
-        the audit trail for its siblings.
+        fails loudly without losing the audit trail.
     """
     outcomes: list[PollOutcome] = []
     with requests.Session() as session:

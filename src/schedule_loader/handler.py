@@ -1,21 +1,12 @@
 """Daily capture of the TfNSW static GTFS bundle.
 
 The bundle is fetched every day but written only when its content hash
-changes. Writing unconditionally would produce ~365 identical snapshots
-a year and destroy the meaning of ``valid_from``, which exists to record
-*when the timetable changed* — the question you need answered when a
-reliability metric moves and you have to say whether the service changed
-or the buses got worse.
+changes, so a ``valid_from`` partition marks a day the timetable
+actually changed.
 
-Urgency note: the bundle is forward-looking. Only 3 service_ids were
-active on the generation day of the bundle measured on 19 September,
-against 98 the next day. A bundle fetched today describes tomorrow
-onward and cannot reconstruct a past day, so every day this does not run
-is a day whose timetable is permanently lost.
-
-The `handler` entry point itself is written in a later task, together
-with its template resources, because a handler with nowhere to run
-cannot be verified.
+The bundle is forward-looking. It describes tomorrow onward and barely
+covers its own generation day, so it cannot reconstruct a past day. A
+day this does not run is a day whose timetable is lost for good.
 """
 
 import io
@@ -41,8 +32,8 @@ logger = Logger()
 BUNDLE_URL: Final[str] = (
     'https://api.transport.nsw.gov.au/v1/gtfs/schedule/buses'
 )
-TIMEOUT: Final[float] = 120.0
-"""Seconds. The bundle is ~95 MiB and took 21.5 s on a home connection."""
+TIMEOUT: Final[float] = 120.0  # seconds
+"""Seconds. The bundle is about 95 MiB and takes tens of seconds."""
 
 CHECK_PREFIX: Final[str] = 'curated/schedule_check/'
 
@@ -77,8 +68,8 @@ def read_filename(*, response: requests.Response) -> str:
     """Extract the bundle filename from the response headers.
 
     The name carries a generation timestamp that changes on every
-    rebuild whether or not the contents differ, so it is recorded for
-    provenance but never used for change detection.
+    rebuild whether or not the contents differ. Record it for
+    provenance, but never use it for change detection.
 
     Parameters
     ----------
@@ -121,8 +112,7 @@ def fetch_bundle(*, api_key: str) -> StaticBundle:
     ------
     RuntimeError
         If the server returns anything other than 200. The day's
-        bundle cannot be recovered later, so this must alarm rather
-        than be swallowed.
+        bundle cannot be recovered later, so a failure must be loud.
     """
     with requests.get(
         BUNDLE_URL,
@@ -218,8 +208,8 @@ def write_dimensions(
     ------
     zipfile.BadZipFile
         If the bundle payload is corrupt or truncated. The bundle's
-        filename and hash are logged first, since a bare traceback
-        would otherwise carry no bundle identity.
+        filename and hash are logged first, since the traceback alone
+        does not identify which bundle failed.
     """
     written: dict[str, int] = {}
     try:
