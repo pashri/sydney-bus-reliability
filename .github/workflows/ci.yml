@@ -18,6 +18,7 @@ jobs:
       - run: uv run mypy src/ scripts/
       - run: uv run isort --check-only src/ tests/ scripts/
       - run: uv run pylint src/ scripts/
+      - run: uv run python -m scripts.check_layer_parity
       # Guard the glob: numpydoc exits 0 given no files, which would
       # silently retire the check.
       - run: |
