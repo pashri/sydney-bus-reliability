@@ -17,19 +17,14 @@ from typing import Any, Final, TypedDict
 
 import boto3
 import duckdb
-import pyarrow as pa
 from aws_lambda_powertools import Logger
 from aws_lambda_powertools.utilities.typing import LambdaContext
 
 from src.common.curation import CurationRepository
 from src.common.process import peak_rss_mb
-from src.common.service_day import (
-    merge_window,
-    scheduled_instant,
-    service_date_for,
-)
+from src.common.service_day import merge_window, service_date_for
 from src.common.types_ import CurationJob, CurationRecord
-from src.merger.merge_sql import POSITION_MERGE, TRIP_STOP_MERGE
+from src.merger.merge_sql import POSITION_MERGE, build_trip_stop_query
 
 logger = Logger()
 
@@ -116,6 +111,9 @@ def configure(
         connections and so cannot be redirected by ``mock_aws()``.
     """
     connection.execute('INSTALL httpfs; LOAD httpfs;')
+    # icu powers AT TIME ZONE with a named zone, used to resolve
+    # scheduled_arrival_utc in pure SQL (see build_trip_stop_query).
+    connection.execute('INSTALL icu; LOAD icu;')
     # CHAIN 'env' pins credential resolution to environment variables,
     # which is what both the Lambda runtime and the test fixtures set,
     # rather than DuckDB's default order which checks a local
@@ -412,56 +410,21 @@ def latest_valid_from(
     return max(eligible) if eligible else None
 
 
-def load_scheduled_arrivals(
+def resolve_dim_source(
     *,
-    connection: duckdb.DuckDBPyConnection,
-    bucket: str,
-    valid_from: str,
-) -> dict[tuple[str, int], str]:
-    """Read one schedule snapshot's arrival times.
-
-    Parameters
-    ----------
-    connection : duckdb.DuckDBPyConnection
-        Configured DuckDB connection.
-    bucket : str
-        Bucket holding the curated layer.
-    valid_from : str
-        The snapshot's ``valid_from`` partition value.
-
-    Returns
-    -------
-    dict[tuple[str, int], str]
-        Scheduled GTFS arrival time as written, keyed by
-        ``(trip_id, stop_sequence)``.
-    """
-    source = (
-        f's3://{bucket}/{DIM_SCHEDULED_STOP_TIME_PREFIX}'
-        f'valid_from={valid_from}/data.parquet'
-    )
-    rows = connection.execute(
-        'SELECT trip_id, stop_sequence, arrival_time '
-        f"FROM read_parquet('{source}')",
-    ).fetchall()
-    return {
-        (trip_id, stop_sequence): arrival_time
-        for trip_id, stop_sequence, arrival_time in rows
-    }
-
-
-def resolve_scheduled_arrivals(
-    *,
-    connection: duckdb.DuckDBPyConnection,
     bucket: str,
     service_date: date,
     session: boto3.Session,
-) -> dict[tuple[str, int], str]:
-    """Load the schedule snapshot in effect for one service date.
+) -> str | None:
+    """Locate the schedule snapshot in effect for one service date.
+
+    Only lists S3 prefixes - never fetches dimension rows into
+    Python, so no TIMESTAMPTZ value is ever pulled across the DuckDB
+    boundary. The join happens entirely in SQL, in
+    ``build_trip_stop_query``.
 
     Parameters
     ----------
-    connection : duckdb.DuckDBPyConnection
-        Configured DuckDB connection.
     bucket : str
         Bucket holding the curated layer.
     service_date : date
@@ -471,100 +434,19 @@ def resolve_scheduled_arrivals(
 
     Returns
     -------
-    dict[tuple[str, int], str]
-        Scheduled GTFS arrival time, keyed by
-        ``(trip_id, stop_sequence)``. Empty when no snapshot exists at
-        or before the service date.
+    str | None
+        S3 path to the snapshot's Parquet object, or None when no
+        snapshot exists at or before the service date.
     """
     valid_from = latest_valid_from(
         client=session.client('s3'), bucket=bucket,
         service_date=service_date,
     )
     if valid_from is None:
-        return {}
-    return load_scheduled_arrivals(
-        connection=connection, bucket=bucket, valid_from=valid_from,
-    )
-
-
-def resolve_scheduled_arrival(
-    *,
-    service_date: str,
-    trip_id: str,
-    stop_sequence: int,
-    scheduled_arrivals: dict[tuple[str, int], str],
-) -> datetime | None:
-    """Resolve one row's scheduled arrival instant.
-
-    Converts a GTFS clock time - including hours past 24, a measured
-    maximum of 30 - to a UTC instant using the trip's own service
-    date, exactly as ``scheduled_instant`` does.
-
-    Parameters
-    ----------
-    service_date : str
-        The trip's own service date, as ``YYYYMMDD``.
-    trip_id : str
-        Trip identifier.
-    stop_sequence : int
-        Position of this call in the trip.
-    scheduled_arrivals : dict[tuple[str, int], str]
-        Scheduled arrival times from ``resolve_scheduled_arrivals``.
-
-    Returns
-    -------
-    datetime | None
-        UTC instant, or None when no schedule row matches - a genuine
-        outcome, not an error, since the fact and dimension are
-        curated on independent schedules.
-    """
-    gtfs_time = scheduled_arrivals.get((trip_id, stop_sequence))
-    if gtfs_time is None:
         return None
-    return scheduled_instant(start_date=service_date, gtfs_time=gtfs_time)
-
-
-def add_scheduled_arrival(
-    *,
-    table: pa.Table,
-    scheduled_arrivals: dict[tuple[str, int], str],
-) -> pa.Table:
-    """Append ``scheduled_arrival_utc`` to a merged trip-stop table.
-
-    Done in Python rather than SQL: the >24:00 rollover needs
-    ``scheduled_instant``'s Sydney-aware wall-clock arithmetic, which
-    DuckDB's timestamp functions cannot express without reimplementing
-    that already-tested logic a second time in SQL.
-
-    Parameters
-    ----------
-    table : pa.Table
-        Merged trip-stop rows, one per ``(service_date, trip_id,
-        stop_id, stop_sequence)``.
-    scheduled_arrivals : dict[tuple[str, int], str]
-        Scheduled arrival times from ``resolve_scheduled_arrivals``.
-
-    Returns
-    -------
-    pa.Table
-        The same table with ``scheduled_arrival_utc`` appended.
-    """
-    column = [
-        None if stop_sequence is None else resolve_scheduled_arrival(
-            service_date=str(service_date),
-            trip_id=str(trip_id),
-            stop_sequence=int(stop_sequence),
-            scheduled_arrivals=scheduled_arrivals,
-        )
-        for service_date, trip_id, stop_sequence in zip(
-            table.column('service_date').to_pylist(),
-            table.column('trip_id').to_pylist(),
-            table.column('stop_sequence').to_pylist(),
-        )
-    ]
-    return table.append_column(
-        'scheduled_arrival_utc',
-        pa.array(column, type=pa.timestamp('s', tz='UTC')),
+    return (
+        f's3://{bucket}/{DIM_SCHEDULED_STOP_TIME_PREFIX}'
+        f'valid_from={valid_from}/data.parquet'
     )
 
 
@@ -599,25 +481,16 @@ def merge_trip_stops(
         f's3://{bucket}/curated/fact_trip_stop/'
         f'service_date={service_date:%Y-%m-%d}/data.parquet'
     )
-    merged = connection.execute(
-        TRIP_STOP_MERGE,
-        {'partials': glob, 'service_date': f'{service_date:%Y%m%d}'},
-    ).to_arrow_table()
-    augmented = add_scheduled_arrival(
-        table=merged,
-        scheduled_arrivals=resolve_scheduled_arrivals(
-            connection=connection,
-            bucket=bucket,
-            service_date=service_date,
-            session=session or boto3.Session(),
-        ),
+    dim_source = resolve_dim_source(
+        bucket=bucket, service_date=service_date,
+        session=session or boto3.Session(),
     )
-    connection.register('merged_trip_stops', augmented)
+    query = build_trip_stop_query(dim_source=dim_source)
     connection.execute(
-        f"COPY (SELECT * FROM merged_trip_stops) TO '{target}' "
+        f"COPY ({query}) TO '{target}' "
         f'(FORMAT PARQUET, COMPRESSION SNAPPY)',
+        {'partials': glob, 'service_date': f'{service_date:%Y%m%d}'},
     )
-    connection.unregister('merged_trip_stops')
     return count_parquet_rows(connection=connection, target=target)
 
 

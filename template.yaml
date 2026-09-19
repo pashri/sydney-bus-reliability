@@ -457,6 +457,27 @@ Resources:
       TreatMissingData: breaching
       AlarmActions: [!Ref AlertTopic]
 
+  # Catches a merger that runs but fails, which the silent alarm above
+  # cannot see - counting Invocations, not Errors, is why three
+  # consecutive failed runs never tripped it.
+  MergerErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Merger invocation errors
+      AlarmName: merger-erroring
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref MergerFunction
+      Statistic: Sum
+      Period: 86400
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopic]
+
 Outputs:
   BucketName:
     Value: !Ref DataBucket

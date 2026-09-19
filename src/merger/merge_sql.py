@@ -119,6 +119,72 @@ regardless of file read order, and then by ``schedule_relationship``
 as a final, purely cosmetic tiebreak.
 """
 
+
+def build_trip_stop_query(*, dim_source: str | None) -> str:
+    """Wrap ``TRIP_STOP_MERGE`` with the scheduled-arrival join.
+
+    Pure SQL end to end: nothing here fetches a ``TIMESTAMPTZ`` value
+    into Python, which the merger's Lambda package cannot support (see
+    ``TRIP_STOP_MERGE``'s own module docstring for the packaging
+    constraint this works around).
+
+    Parameters
+    ----------
+    dim_source : str | None
+        S3 path to the schedule snapshot in effect for the service
+        date, or None when no snapshot exists at or before it.
+
+    Returns
+    -------
+    str
+        A query selecting every ``TRIP_STOP_MERGE`` column plus
+        ``scheduled_arrival_utc``, NULL for a row with no matching
+        schedule row.
+
+    Notes
+    -----
+    Reproduces ``src.common.service_day.scheduled_instant``'s
+    wall-clock convention: the GTFS clock offset is added to local
+    midnight and the result localised to Sydney, not treated as
+    elapsed seconds from a fixed anchor. This is deliberate and
+    matches the printed timetable across the 4 October 2026 DST
+    transition; do not switch conventions. Verified against
+    ``scheduled_instant`` on both sides of the jump and past hour 24,
+    up to the measured maximum of hour 30.
+    """
+    if dim_source is None:
+        join = ''
+        arrival = 'CAST(NULL AS TIMESTAMPTZ)'
+    else:
+        join = f"""
+        LEFT JOIN read_parquet('{dim_source}') AS schedule
+          ON  schedule.trip_id = day_merge.trip_id
+          AND schedule.stop_sequence = day_merge.stop_sequence
+        """
+        arrival = """
+        CASE WHEN schedule.arrival_time IS NULL THEN NULL ELSE (
+            strptime(day_merge.service_date, '%Y%m%d')
+            + INTERVAL (
+                CAST(split_part(schedule.arrival_time, ':', 1) AS BIGINT)
+            ) HOUR
+            + INTERVAL (
+                CAST(split_part(schedule.arrival_time, ':', 2) AS BIGINT)
+            ) MINUTE
+            + INTERVAL (
+                CAST(split_part(schedule.arrival_time, ':', 3) AS BIGINT)
+            ) SECOND
+        ) AT TIME ZONE 'Australia/Sydney' END
+        """
+    return f"""
+    WITH day_merge AS (
+        {TRIP_STOP_MERGE}
+    )
+    SELECT day_merge.*, {arrival} AS scheduled_arrival_utc
+    FROM day_merge
+    {join}
+    """
+
+
 POSITION_MERGE: Final[str] = """
 SELECT DISTINCT ON (vehicle_id, observed_at_utc, lat, lon) *
 FROM read_parquet($partials)
