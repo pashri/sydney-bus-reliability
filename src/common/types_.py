@@ -109,3 +109,18 @@ class CurationRecord(TypedDict):
     unjoined_stop_ids: int
     peak_rss_mb: int
     error: str | None
+
+
+class ScheduleCheck(TypedDict):
+    """One daily static-GTFS fetch, changed or not.
+
+    Written on every check so that "the timetable did not change
+    between these dates" is an assertion backed by records rather
+    than by absent partitions.
+    """
+
+    checked_at_utc: str
+    zip_sha256: str
+    zip_filename: str
+    changed: bool
+    valid_from: str | None
