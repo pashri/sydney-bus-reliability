@@ -24,6 +24,7 @@ dev = [
     "pyarrow-stubs>=20.0.0.20260819",
     "pyarrow==24.0.0",
     "duckdb>=1.5",
+    "types-protobuf",
 ]
 
 [tool.isort]
@@ -38,6 +39,19 @@ addopts = "--cov=src --cov-report=term-missing"
 [tool.mypy]
 python_version = "3.14"
 strict = true
+
+[[tool.mypy.overrides]]
+# Generated protobuf code; gtfs-realtime-bindings ships no stubs and
+# types-protobuf does not cover the transit bindings. Scoped to this
+# one module so the protobuf runtime itself stays type-checked.
+module = ["google.transit.*"]
+ignore_missing_imports = true
+
+[tool.pylint.typecheck]
+# Protobuf builds message classes dynamically at import, so pylint
+# cannot resolve members such as FeedMessage. Scoped to the generated
+# bindings module only.
+ignored-modules = ["google.transit.gtfs_realtime_pb2"]
 
 [tool.numpydoc_validation]
 checks = [
