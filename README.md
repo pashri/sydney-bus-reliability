@@ -10,6 +10,13 @@ compaction, analysis and marts are not built yet.
 Contains public sector information licensed under the Creative Commons
 Attribution 4.0 licence. Data source: Transport for NSW.
 
+Arrival times come from GTFS-Realtime Trip Updates, which carry
+predictions, not observations. The last prediction before a bus passes a
+stop is used as a proxy for actual arrival — a good proxy when a vehicle
+keeps reporting up to that moment, unreliable when it drops out early. See
+[`docs/methodology.md`](docs/methodology.md) for this and every other
+measured limitation on what the data can support.
+
 ## Stack
 
 - AWS SAM: one collector Lambda on a 1-minute schedule, one schedule
