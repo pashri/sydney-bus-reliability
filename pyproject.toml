@@ -25,6 +25,13 @@ dev = [
     "pyarrow==24.0.0",
     "duckdb>=1.5",
     "types-protobuf",
+    # Not imported directly: DuckDB requires it to convert
+    # TIMESTAMPTZ columns to tz-aware Python datetimes when a query
+    # result is fetched, which the merge-SQL tests do. Binding a
+    # tz-aware datetime as a query parameter works without it; only
+    # the fetch-back path needs it. The merger itself never fetches
+    # DuckDB results into Python, so this is test-only.
+    "pytz>=2025.1",
 ]
 
 [tool.isort]
