@@ -1,171 +1,262 @@
 # Methodology and known limitations
 
-This document states what the curated data can and cannot support, with the
-measured number behind each limit. Every figure below was measured by
-decoding a day of the collected feeds before the pipeline was designed, so
-the design answers what TfNSW actually publishes rather than what the GTFS
-specification permits. Where a sample is too small or too narrow to settle a
-question, the limit says so.
+This document explains what the data in this project can and cannot tell
+you, and gives the measurement behind each limit.
 
-## 1. Trip Updates are predictions, not measurements
+Every figure here comes from decoding a day of the collected feeds, which
+happened before the pipeline was designed. That order matters: the design
+answers what Transport for NSW actually publishes, rather than everything
+the GTFS specification would permit a publisher to do. Some questions a
+single day cannot settle. Where that is the case, the limit says so.
 
-GTFS-Realtime Trip Updates carry a predicted arrival time, refreshed roughly
-every 60 seconds. There is no direct record of when a bus actually reached a
-stop — the last prediction issued before the bus passes is used as a proxy
-for actual arrival. That proxy is close to the truth when a vehicle keeps
-reporting up to the moment of arrival, and wrong when it does not.
+## Where the data comes from
 
-Rows whose final update landed more than 60 seconds before the predicted
-arrival time get `is_reliable = false` and are excluded from headline
-metrics. Every arrival-time figure in this project inherits this proxy and
-its exclusion rule.
+Transport for NSW publishes two kinds of public transport data, and this
+project uses both.
 
-## 2. `vehicle_id` is a trip-instance token, not a bus
+The first is the timetable: a zip file, republished whenever services
+change, saying which trips are meant to run, along which route, calling at
+which stops and when.
 
-Measured across one hour: 6,920 distinct `vehicle.id` values against 6,919
-distinct `trip_id` values, and zero vehicles reported under more than one
-`trip_id`. The id is issued per trip, not per physical vehicle, and does not
-survive a trip change.
+The second is live, published continuously, and comes in two feeds that
+answer different questions. Vehicle Positions say where a bus is now; each
+tracked bus reports its coordinates roughly every 10 seconds. Trip Updates
+say when a bus is expected to arrive; roughly every 60 seconds, each trip
+publishes a predicted arrival time for the stops still ahead of it.
 
-The real identity of a bus is `vehicle_label`, a four-digit fleet number
-(e.g. `8183`), corroborated by `license_plate` (`MO8183`). Grouping by
-`vehicle_id` to study individual buses — bunching by vehicle, fleet-level
-effects — produces a fictional fleet of roughly 6,920 buses per hour instead
-of the real fleet. All per-vehicle analysis in this project keys on
-`vehicle_label`.
+This project collects both feeds continuously and joins them to the
+timetable, which is how it can ask how late buses actually are.
 
-## 3. `NO_DATA` rows echo the static timetable
+## Terms used here
 
-24.4% of stop-time-updates in the sampled hour carry
-`schedule_relationship = NO_DATA`. These rows still populate `arrival.delay`
-and `arrival.time`, and the values are not predictions: `arrival.delay` is
-identically 0 on 99.906% of them, and `arrival.time` matches the static
-scheduled instant to the exact second on 99.86%, with no ±1-second rounding
-band. A real prediction has no reason to land on the scheduled second that
-precisely — the absence of any rounding noise is the signature of a copy,
-not a computation. TfNSW is echoing the timetable back when no vehicle is
-assigned to a trip.
+A **trip** is one scheduled run of a route at a particular time, like the
+07:14 from Parramatta. It is not a bus, and not a route.
 
-Treating these rows as observations injects a fake, perfect, zero-second
-delay onto roughly a quarter of the data, which biases any on-time or delay
-metric toward looking better than it is. This project nulls `delay_s` and
-the predicted-time columns on `NO_DATA` rows rather than dropping them: "no
-vehicle was reported for this trip at this time" is itself a fact worth
-keeping.
+A **stop-time update** is one prediction, for one stop, on one trip. When a
+stop-time update is marked **`NO_DATA`**, Transport for NSW is saying it has
+no live information for that stop. That marker turns out to matter a great
+deal, and section 3 is about why.
 
-## 4. `NO_DATA` is not cancellation
+A **service day** is a transport day rather than a calendar day. A trip
+leaving at 00:30 on Saturday belongs to Friday's service day, because
+Friday's timetable is the one it runs on.
 
-`NO_DATA` and `CANCELED` are different fields describing different
-populations. `NO_DATA` is a stop-level value on `StopTimeUpdate` meaning no
-realtime timing information is available for that stop. `CANCELED` is a
-trip-level value on `TripDescriptor`, measured at 1.56% of trip updates, and
-a canceled trip still carries a full array of stop-time updates. Neither
-implies the other, and code that reads one to infer the other will be wrong.
+## The short version
 
-## 5. Realtime coverage has a floor of about 3%
+| The limit | What it means when you use the data |
+| --- | --- |
+| 1. Arrival times are predictions | There is no record of when a bus truly arrived. We use its last prediction as a stand-in. |
+| 2. `vehicle_id` is not a bus | Use `vehicle_label` to follow a physical bus. |
+| 3. A quarter of rows echo the timetable | These are not observations. We blank their times so they can't flatter the results. |
+| 4. `NO_DATA` does not mean cancelled | They are separate fields. Reading one as the other gives wrong answers. |
+| 5. About 3% of running trips report nothing | Every coverage figure carries this floor. |
+| 6. That gap is not worse in Western Sydney | Checked, because the project's headline comparison depends on it. |
+| 7. The feeds cover all of NSW | Sydney is a filter you apply, not something the feed gives you. |
+| 8. The timetable only looks forward | Days before collection began cannot be reconstructed. |
+| 9. Unmatched ids are kept, not guessed | A small number of rows have no route attached, on purpose. |
+| 10. One timezone convention is unverified | It only matters on the day daylight saving starts. |
+| 11. Two alarms cry wolf by design | Expect a self-clearing alert on 4 October. |
+| 12. Unknown codes read as missing | Absent means "not sent or not recognised". |
+| 13. `lost_tracking` mixes two clocks | Checked, and it cannot change the answer. |
 
-Of trips that should be in progress at the moment of a poll, 4.52% report no
-vehicle. Excluding trips within 20 minutes of either scheduled endpoint,
-where "in progress" is a fuzzier classification, that figure falls to 2.68%.
-This is a genuine floor on realtime coverage, not boundary noise from the
-in-progress definition, and every coverage-dependent figure in this project
-inherits it. Some of the residual is very-late or cancelled-but-unflagged
-trips rather than a telematics fault; the measurement could not separate the
-two causes.
+---
 
-## 6. Coverage is not geographically biased
+## What the numbers actually measure
 
-This is load-bearing for the project's Western Sydney comparison: if
-realtime coverage dropped out more in one part of the metro area than
-another, a reliability gap could be an artefact of missing data rather than
-a real difference in service.
+### 1. Arrival times are predictions, not observations
 
-Measured on in-progress trips within the Sydney metro area, bucketed by stop
-centroid longitude: west (lon < 151.0) shows 5.20% NO_DATA across 2,904
-trips; east (lon ≥ 151.15) shows 4.69% across 3,325 trips. The gap is 0.51
-percentage points against a standard error on that difference of about 0.55
-points — smaller than its own uncertainty, so it is not distinguishable from
-zero.
+Transport for NSW never publishes "the bus arrived at 08:14". What it
+publishes is a stream of predictions, refreshed roughly every 60 seconds,
+each saying when it currently expects the bus to get there. The arrival
+itself is never reported.
 
-This check covers one day at steady state. It would not catch a bad-day
-incident where a single operator's AVL drops out wholesale, because that is
-exactly the kind of event a single-day snapshot cannot see.
+So this project takes the last prediction issued before the bus passed the
+stop and treats it as the arrival time. How good that stand-in is depends
+entirely on when the bus stopped talking: one reporting right up to the kerb
+gives a prediction worth trusting, while one that goes quiet five minutes
+out leaves a guess frozen at whatever it last said.
 
-## 7. The feeds are statewide NSW, not Sydney
+To keep that from quietly corrupting the results, any row whose final update
+arrived more than 60 seconds before the predicted arrival is marked
+`is_reliable = false` and left out of headline figures. Every arrival-time
+number in this project depends on this stand-in and this exclusion rule.
 
-Vehicles from Newcastle and Wollongong were observed in the realtime feed,
-and the static bundle carries 33 agencies, not one Sydney operator. Sydney
-is not a property of the feed; it is defined at analysis time by filtering
-on `dim_stop` geography. Anything that skips that filter is analysing the
-whole state.
+### 2. `vehicle_id` identifies a trip, not a bus
 
-## 8. The static bundle is forward-looking
+This one is a trap, because the field name suggests otherwise.
 
-The static bundle's calendar spans 20260917–20270101, but only 3
-`service_id`s are active on the bundle's own generation day, against 98 the
-next day. The bundle describes the future from its generation date onward
-and cannot reconstruct a day that has already passed. As a direct
-consequence, 16–18 September 2026 have realtime data but no schedule to join
-it to, because no bundle was captured on or before those dates.
+Across one measured hour there were 6,920 distinct `vehicle.id` values and
+6,919 distinct trips, and no vehicle id ever appeared on more than one trip.
+The id is issued fresh for each trip and does not survive when a bus starts
+its next one.
 
-## 9. Unjoinable identifiers are recorded, not repaired
+The real identity of a bus is `vehicle_label`, a four-digit fleet number such
+as `8183`, backed up by its number plate (`MO8183`). Anyone grouping by
+`vehicle_id` to study individual buses - looking at bunching, or how one
+vehicle performs across a day - would be studying an imaginary fleet of
+about 6,920 buses an hour instead of the few thousand that exist. All
+per-vehicle analysis here uses `vehicle_label`.
 
-About 0.2% of realtime route ids fail to join to the static bundle. One
-case, `_144` (empty agency prefix), is genuinely ambiguous: `144` exists
-under two agencies, `2508_144` and `2514_144`, and nothing in the data says
-which one a bare `_144` refers to. These rows are kept with a null
-dimension reference and a counter in `curation_run`, never guessed at by
-fuzzy matching.
+### 3. A quarter of the rows are the timetable echoed back
 
-## 10. The GTFS time convention is wall-clock, and unverified for TfNSW
+When no bus is assigned to a trip, Transport for NSW does not go quiet. It
+sends back the scheduled time, marked `NO_DATA`, in the same shape as a real
+prediction.
 
-`scheduled_instant` is computed by adding the GTFS time offset to local
-midnight. The GTFS spec's literal definition is noon minus 12 hours, which
-agrees with the wall-clock interpretation except across a daylight-saving
-transition. This project has not confirmed which convention TfNSW's feed
-actually follows.
+In the sampled hour, 24.4% of stop-time updates were `NO_DATA`. They still
+carried a delay and an arrival time, and those values give the copying away:
 
-The `NO_DATA` echo finding (§3) gives a way to settle it directly: compare
-echoed `arrival.time` values against `scheduled_instant` for trips crossing
-02:00 on 4 October 2026, the date Sydney moves to daylight saving. If the
-two conventions disagree, the echoes will show it.
+- the delay was exactly 0 on 99.906% of them
+- the arrival time matched the timetable to the exact second on 99.86%, with
+  no one-second scatter either side
 
-## 11. Two CloudWatch alarms will produce false positives, by design
+That second figure is the giveaway. A real calculation produces rounding
+noise, and a genuine prediction has no reason to land precisely on the
+scheduled second. There is no noise at all.
 
-`TreatMissingData: breaching` is set deliberately: Lambda publishes no
-datapoint at all when a function does not run, so a dead function produces
-silence rather than an error metric, and treating silence as breaching is
-the only way to catch it. Two consequences follow from that choice.
+Treating these rows as observations would inject a perfect, zero-second
+delay into roughly a quarter of the data, and punctuality would look far
+better than it is. So this project blanks the delay and predicted-time
+columns on `NO_DATA` rows. It keeps the rows themselves, because "no bus was
+reported here at this time" is worth knowing.
 
-First, every such alarm fires once at creation, before its function has run
-even a single time, and clears itself on the first invocation. This already
-happened: `schedule-loader-not-running` alarmed at 15:19 on 19 September and
-cleared at 15:22.
+### 10. Which midnight a timetable time counts from
 
-Second, a 24-hour alarm window on a 24-hour job is stable except on 4
-October, when Sydney's daylight-saving shift moves noon-local by an hour in
-UTC terms and can put two runs inside one window and none inside the next.
-Expect one more self-clearing email around that date. Neither of these is an
-outage.
+Timetables express times as an offset into the service day, and services
+running past midnight use hours past 24 - a trip at `25:10:00` leaves at
+1:10 am the next morning.
 
-## 12. Unknown enum values arrive as absent
+This project converts those times by adding the offset to local midnight.
+The GTFS specification defines it slightly differently, as noon minus twelve
+hours. On any ordinary day the two agree exactly; they part company only
+across a daylight-saving transition, where they land an hour apart. Which
+one Transport for NSW follows has not been confirmed.
 
-GTFS-Realtime is proto2, where enum fields are closed: a wire value the
-compiled bindings do not recognise never reaches the field at all, so it
-reads as absent rather than as some known-but-wrong value. The unrecognised
-value itself is not preserved anywhere — proto2 does not expose it. Code
-that reads these fields uses `HasField` rather than trusting a present
-default, because the corresponding default (e.g. `IN_TRANSIT_TO` for
-`current_status`) is indistinguishable from a genuine reading unless checked
-that way.
+There is a clean way to settle it, using the echo finding above: compare the
+echoed arrival times against our own calculation for trips crossing 02:00 on
+4 October 2026, when Sydney moves to daylight saving. If the conventions
+disagree, the echoes will show it.
 
-## 13. `lost_tracking` compares two different clocks
+### 13. `lost_tracking` compares two different clocks
 
-The `lost_tracking` flag compares an echo's poll time against a real
-observation's entity timestamp — two clocks with different behaviour.
-Measured entity-timestamp staleness: median 6-9 seconds, p90 15-65 seconds,
-max 3,103 seconds. Despite that spread, the flag cannot produce a wrong
-final answer in realistic update sequences, because what decides it is
+The `lost_tracking` flag works out whether a bus stopped reporting partway
+through its trip, and working that out means comparing an echo's poll time
+against a real observation's own timestamp. Those two clocks behave
+differently. Measured staleness of the entity timestamp: median 6-9 seconds,
+90th percentile 15-65 seconds, maximum 3,103 seconds.
+
+That spread cannot change the answer, though. What decides the flag is
 whether the echoes that follow the last real observation are ordered after
-it, and they are — the mixing of clocks affects how stale a value looks, not
-which value is last.
+it, and they always are. Mixing the clocks changes how stale a value looks,
+never which value is last.
+
+---
+
+## What the data cannot tell you
+
+### 4. `NO_DATA` does not mean cancelled
+
+These are two different fields describing two different things, and
+conflating them is an easy mistake to make.
+
+`NO_DATA` sits on an individual stop. It means there is no live timing for
+that stop. `CANCELED` sits on the whole trip, was measured on 1.56% of trip
+updates, and does not stop the trip carrying a full set of stop-time updates
+anyway. Neither implies the other. Any code that reads one to infer the
+other will be wrong.
+
+### 5. About 3% of running trips report no bus at all
+
+Of trips that should have been underway at the moment of a poll, 4.52%
+reported no vehicle. Restricting that to trips well clear of their start and
+end - more than 20 minutes from either, where "underway" is unambiguous -
+gives 2.68%.
+
+That 2.68% is a real floor on live coverage, not an artefact of where the
+boundary was drawn, and every coverage-dependent figure in this project
+inherits it. Some of it will be very late or quietly cancelled trips rather
+than a tracking fault. The measurement cannot separate the two.
+
+### 6. The coverage gap is not worse in one part of Sydney
+
+This one is load-bearing. The project's headline question compares Western
+Sydney with the east, so if buses in the west went untracked more often, a
+reliability gap could simply be missing data wearing a disguise.
+
+Measured on trips underway inside the Sydney metro area, split by stop
+longitude: the west (below 151.0) showed 5.20% `NO_DATA` across 2,904 trips,
+the east (151.15 and above) 4.69% across 3,325 trips. The difference is 0.51
+percentage points, against an uncertainty on that difference of about 0.55
+points. The gap is smaller than its own margin of error, so it cannot be
+told apart from zero.
+
+The limits of that check are worth stating. It covers one ordinary day. It
+would not catch a bad-day incident where one operator's tracking fails
+wholesale, because a single-day snapshot cannot see events like that.
+
+### 7. The feeds cover the whole state, not just Sydney
+
+Buses from Newcastle and Wollongong turn up in the live feed, and the
+timetable covers 33 separate operators rather than one Sydney agency.
+
+"Sydney" is not something the feed hands you. It is a filter applied at
+analysis time using stop locations. Any analysis that skips that filter is
+quietly reporting on all of New South Wales.
+
+### 8. The timetable only describes the future
+
+The timetable file looks forward from the moment it is published. Its
+calendar ran from 17 September 2026 to 1 January 2027, but only 3 services
+were active on the day it was generated, against 98 the following day.
+
+It therefore cannot reconstruct a day that has already gone. That has a
+direct consequence for this project: 16 to 18 September 2026 have live data
+but no timetable to compare it against, because no timetable file was
+captured on or before those dates.
+
+### 9. Identifiers that don't match are recorded, not repaired
+
+About 0.2% of route ids in the live feed do not match anything in the
+timetable. One of them, `_144`, is genuinely unresolvable: the route number
+`144` exists under two different operators, `2508_144` and `2514_144`, and
+nothing in the data says which one a bare `_144` means.
+
+Rows like this are kept with an empty route reference and counted in the
+audit record. They are never resolved by guessing at a close match, because
+a plausible wrong answer is worse than a visible gap.
+
+---
+
+## Notes for running the pipeline
+
+### 11. Two alarms raise false alerts on purpose
+
+The alarms that watch for a function failing to run are configured to treat
+silence as a problem. This is deliberate: when a scheduled function does not
+run, it reports nothing at all rather than reporting an error, so silence is
+the only symptom there is.
+
+Two harmless consequences follow.
+
+A new alarm of this kind fires the moment it is created, before its function
+has had a chance to run, and clears itself on the first successful run. This
+already happened: `schedule-loader-not-running` alerted at 15:19 on 19
+September and cleared at 15:22.
+
+A 24-hour alarm watching a once-a-day job is also stable except on 4
+October, when the switch to daylight saving shifts the run by an hour and
+can place two runs in one window and none in the next. Expect one more
+self-clearing email around that date. Neither case is an outage.
+
+### 12. Codes we don't recognise arrive as missing
+
+The live feeds use a format (protocol buffers, version 2) where each coded
+field has a fixed list of permitted values. If Transport for NSW ever sends a value outside that list,
+it does not arrive as a wrong-but-valid code - it does not arrive at all,
+and the field reads as empty. The unrecognised value itself is not preserved
+anywhere.
+
+This is why the code always asks whether a field was actually sent rather
+than reading it directly. Several of these fields have a default that looks
+like a real answer - `current_status` defaults to "in transit to" - and a
+default is indistinguishable from a genuine reading unless you check.
