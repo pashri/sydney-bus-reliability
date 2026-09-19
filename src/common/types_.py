@@ -70,3 +70,42 @@ class CollectionCounts(TypedDict):
     fetched: int
     stored: int
     failed: int
+
+
+class CurationJob(StrEnum):
+    """One of the three Phase 2 curation Lambdas."""
+
+    SCHEDULE_LOADER = 'schedule_loader'
+    COMPACTOR = 'compactor'
+    MERGER = 'merger'
+
+
+class CurationRecord(TypedDict):
+    """One curation invocation's audit row.
+
+    Separate from ``RunRecord`` on purpose: ``collector_run`` answers
+    "was the gap TfNSW or the collector?", and folding curation
+    outcomes into it would make that question unanswerable.
+
+    The three duplicate and unjoined counters exist because the
+    exploration spike measured their rates (526 differing-position
+    duplicates per peak hour, ~0.2% unjoined route ids); recording
+    them keeps drift visible instead of silent.
+    """
+
+    job: str
+    invocation_id: str
+    started_at_utc: str
+    finished_at_utc: str
+    partition: str
+    objects_expected: int
+    objects_read: int
+    rows_in: int
+    rows_out: int
+    dupes_collapsed: int
+    dupes_differing_position: int
+    unjoined_route_ids: int
+    unjoined_trip_ids: int
+    unjoined_stop_ids: int
+    peak_rss_mb: int
+    error: str | None
