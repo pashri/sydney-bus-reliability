@@ -1,9 +1,11 @@
 # Methodology and known limitations
 
 This document states what the curated data can and cannot support, with the
-measured number behind each limit. Every figure below traces to
-`sydney-bus-reliability-phase-2-SPIKE.md` or to the Phase 2 design, both
-outside this repo. Nothing here is asserted from assumption.
+measured number behind each limit. Every figure below was measured by
+decoding a day of the collected feeds before the pipeline was designed, so
+the design answers what TfNSW actually publishes rather than what the GTFS
+specification permits. Where a sample is too small or too narrow to settle a
+question, the limit says so.
 
 ## 1. Trip Updates are predictions, not measurements
 
@@ -47,9 +49,9 @@ assigned to a trip.
 Treating these rows as observations injects a fake, perfect, zero-second
 delay onto roughly a quarter of the data, which biases any on-time or delay
 metric toward looking better than it is. This project nulls `delay_s` and
-the predicted-time columns on `NO_DATA` rows rather than dropping them —
-"no vehicle was reported for this trip at this time" is itself a fact worth
-keeping, and dropping the row would erase it.
+the predicted-time columns on `NO_DATA` rows rather than dropping them: "no
+vehicle was reported for this trip at this time" is itself a fact worth
+keeping.
 
 ## 4. `NO_DATA` is not cancellation
 
@@ -68,8 +70,8 @@ where "in progress" is a fuzzier classification, that figure falls to 2.68%.
 This is a genuine floor on realtime coverage, not boundary noise from the
 in-progress definition, and every coverage-dependent figure in this project
 inherits it. Some of the residual is very-late or cancelled-but-unflagged
-trips rather than a telematics fault; the spike could not separate the two
-causes.
+trips rather than a telematics fault; the measurement could not separate the
+two causes.
 
 ## 6. Coverage is not geographically biased
 
@@ -85,10 +87,9 @@ percentage points against a standard error on that difference of about 0.55
 points — smaller than its own uncertainty, so it is not distinguishable from
 zero.
 
-State the limits of this check plainly. It covers one day at steady state.
-It would not catch a bad-day incident where a single operator's AVL drops
-out wholesale, because that is exactly the kind of event a single-day
-snapshot cannot see.
+This check covers one day at steady state. It would not catch a bad-day
+incident where a single operator's AVL drops out wholesale, because that is
+exactly the kind of event a single-day snapshot cannot see.
 
 ## 7. The feeds are statewide NSW, not Sydney
 
@@ -147,7 +148,7 @@ UTC terms and can put two runs inside one window and none inside the next.
 Expect one more self-clearing email around that date. Neither of these is an
 outage.
 
-## 12. Unknown enum values are recorded as null, not coerced
+## 12. Unknown enum values arrive as absent
 
 GTFS-Realtime is proto2, where enum fields are closed: a wire value the
 compiled bindings do not recognise never reaches the field at all, so it
