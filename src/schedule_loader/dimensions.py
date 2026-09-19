@@ -4,6 +4,11 @@ Every field in the bundle arrives double-quoted, including numerics, so
 type coercion happens here rather than being inferred. Identifiers stay
 strings: ``stop_id`` is 5-7 digits with no fixed width (``200013`` sits
 beside ``2000100``), so treating it as a number would destroy the join.
+
+``stop_sequence`` and ``shape_pt_sequence`` are ordinals, not
+identifiers, and are coerced to ``int32``. A string sort orders them
+lexicographically - ``['1', '10', '11', ..., '2', ...]`` - which
+silently zigzags any route with ten or more stops or shape vertices.
 """
 
 import zipfile
@@ -145,7 +150,7 @@ def stop_time_record(*, row: Row) -> Record:
     return {
         'trip_id': row['trip_id'],
         'stop_id': row['stop_id'],
-        'stop_sequence': row['stop_sequence'],
+        'stop_sequence': int(row['stop_sequence']),
         'arrival_time': row['arrival_time'],
         'departure_time': row['departure_time'],
         'shape_dist_traveled': optional_float(
@@ -169,7 +174,7 @@ def shape_record(*, row: Row) -> Record:
     """
     return {
         'shape_id': row['shape_id'],
-        'shape_pt_sequence': row['shape_pt_sequence'],
+        'shape_pt_sequence': int(row['shape_pt_sequence']),
         'shape_pt_lat': optional_float(value=row['shape_pt_lat']),
         'shape_pt_lon': optional_float(value=row['shape_pt_lon']),
         'shape_dist_traveled': optional_float(
@@ -259,7 +264,7 @@ TRIP_SCHEMA: Final[pa.Schema] = pa.schema([
 SCHEDULED_STOP_TIME_FIELDS: Final[list[pa.Field[Any]]] = [
     pa.field('trip_id', pa.string()),
     pa.field('stop_id', pa.string()),
-    pa.field('stop_sequence', pa.string()),
+    pa.field('stop_sequence', pa.int32()),
     pa.field('arrival_time', pa.string()),
     pa.field('departure_time', pa.string()),
     pa.field('shape_dist_traveled', pa.float64()),
@@ -269,7 +274,7 @@ SCHEDULED_STOP_TIME_SCHEMA: Final[pa.Schema] = pa.schema(
 )
 SHAPE_FIELDS: Final[list[pa.Field[Any]]] = [
     pa.field('shape_id', pa.string()),
-    pa.field('shape_pt_sequence', pa.string()),
+    pa.field('shape_pt_sequence', pa.int32()),
     pa.field('shape_pt_lat', pa.float64()),
     pa.field('shape_pt_lon', pa.float64()),
     pa.field('shape_dist_traveled', pa.float64()),

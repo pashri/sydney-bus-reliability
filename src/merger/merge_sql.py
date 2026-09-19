@@ -29,60 +29,94 @@ latest AS (
     SELECT
         *,
         ROW_NUMBER() OVER (
-            PARTITION BY service_date, trip_id, stop_id
-            ORDER BY last_update_at_utc DESC NULLS LAST
+            PARTITION BY service_date, trip_id, stop_id, stop_sequence
+            ORDER BY
+                last_update_at_utc DESC NULLS LAST,
+                last_observed_at_utc DESC NULLS LAST,
+                schedule_relationship DESC NULLS LAST
         ) AS recency
     FROM partials
-)
-SELECT
-    latest.service_date,
-    latest.trip_id,
-    latest.stop_id,
-    latest.stop_sequence,
-    latest.route_id,
-    latest.final_predicted_arrival_utc,
-    latest.delay_s,
-    latest.final_predicted_departure_utc,
-    latest.departure_delay_s,
-    latest.last_update_at_utc,
-    totals.n_updates,
-    latest.schedule_relationship,
-    latest.trip_schedule_relationship,
-    totals.had_vehicle,
-    totals.lost_tracking,
-    (
-        latest.delay_s IS NOT NULL
-        AND NOT totals.lost_tracking
-        AND latest.last_update_at_utc >= (
-            latest.final_predicted_arrival_utc
-            - INTERVAL '{RELIABLE_LEAD_SECONDS}' SECOND
-        )
-    ) AS is_reliable
-FROM latest
-JOIN (
+),
+totals AS (
     SELECT
         service_date,
         trip_id,
         stop_id,
+        stop_sequence,
         SUM(n_updates) AS n_updates,
         BOOL_OR(had_vehicle) AS had_vehicle,
-        BOOL_OR(lost_tracking) AS lost_tracking
+        MAX(last_observed_at_utc) AS final_last_observed_at_utc
     FROM partials
-    GROUP BY service_date, trip_id, stop_id
-) AS totals
-  ON  totals.service_date = latest.service_date
-  AND totals.trip_id      = latest.trip_id
-  AND totals.stop_id      = latest.stop_id
-WHERE latest.recency = 1
+    GROUP BY service_date, trip_id, stop_id, stop_sequence
+),
+merged AS (
+    SELECT
+        latest.service_date,
+        latest.trip_id,
+        latest.stop_id,
+        latest.stop_sequence,
+        latest.route_id,
+        latest.final_predicted_arrival_utc,
+        latest.delay_s,
+        latest.final_predicted_departure_utc,
+        latest.departure_delay_s,
+        latest.last_update_at_utc,
+        totals.n_updates,
+        latest.schedule_relationship,
+        latest.trip_schedule_relationship,
+        totals.had_vehicle,
+        (
+            latest.last_update_at_utc IS NOT NULL
+            AND totals.final_last_observed_at_utc
+                > latest.last_update_at_utc
+        ) AS lost_tracking
+    FROM latest
+    JOIN totals
+      ON  totals.service_date  = latest.service_date
+      AND totals.trip_id       = latest.trip_id
+      AND totals.stop_id       = latest.stop_id
+      AND totals.stop_sequence = latest.stop_sequence
+    WHERE latest.recency = 1
+)
+SELECT
+    merged.*,
+    (
+        merged.delay_s IS NOT NULL
+        AND NOT merged.lost_tracking
+        AND merged.last_update_at_utc >= (
+            merged.final_predicted_arrival_utc
+            - INTERVAL '{RELIABLE_LEAD_SECONDS}' SECOND
+        )
+    ) AS is_reliable
+FROM merged
 """
 
 """Merge hourly trip-stop partials into one row per service-day stop.
 
+The grain is ``(service_date, trip_id, stop_id, stop_sequence)``, not
+``(service_date, trip_id, stop_id)``: loop and shuttle routes call the
+same ``stop_id`` twice on one trip, at two different sequence
+positions, and both real calls must survive the merge.
+
 ``RELIABLE_LEAD_SECONDS`` is interpolated into the interval literal
 rather than hardcoded, so the reliability threshold has one source of
-truth. ``n_updates``, ``had_vehicle`` and ``lost_tracking`` come from a
-separate aggregate subquery joined back to the latest row by key, so
-the aggregation can never fan out the row count of ``latest``.
+truth. ``n_updates`` and ``had_vehicle`` come from a separate
+aggregate subquery joined back to the latest row by key, so the
+aggregation can never fan out the row count of ``latest``.
+
+``lost_tracking`` describes the *final* state of the day, not whether
+any hour ever dropped: it compares the day's latest observation of any
+kind (``MAX(last_observed_at_utc)``) against the day's latest real
+observation (which ``latest.last_update_at_utc`` already is, since the
+window function orders by it descending). A key with no real
+observation at all - ``last_update_at_utc IS NULL`` - is never-reported
+rather than lost, so it is not marked as lost tracking either.
+
+The ``ROW_NUMBER()`` tiebreak is fully deterministic: ties on
+``last_update_at_utc`` (typically both NULL, pre-departure echoes) are
+broken by ``last_observed_at_utc``, which is set on every row
+regardless of file read order, and then by ``schedule_relationship``
+as a final, purely cosmetic tiebreak.
 """
 
 POSITION_MERGE: Final[str] = """

@@ -1,11 +1,13 @@
 """Tests for the daily merger handler."""
 
+import io
 import json
 import os
 from datetime import UTC, date, datetime
 from pathlib import Path
 
 import boto3
+import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
@@ -14,10 +16,13 @@ from src.common.service_day import merge_window
 from src.compactor.positions import POSITION_SCHEMA
 from src.compactor.trip_updates import TRIP_STOP_SCHEMA
 from src.merger.handler import (
+    configure,
     handler,
+    merge_trip_stops,
     partial_hour_from_key,
     target_service_date,
 )
+from src.schedule_loader.dimensions import SCHEDULED_STOP_TIME_SCHEMA
 
 
 class _Context:
@@ -204,3 +209,114 @@ def test_handler_records_a_short_day(
     assert record['error'] is None
     assert record['objects_expected'] > record['objects_read']
     assert record['objects_read'] == 2
+
+
+def test_merge_trip_stops_resolves_scheduled_arrival(
+    _bucket: str, _s3_endpoint: str, tmp_path: Path,
+) -> None:
+    """scheduled_arrival_utc is resolved for a normal and a >24:00 time.
+
+    The dimension snapshot's ``valid_from`` predates the service date,
+    as it must for the lookup to find it.
+    """
+    service_date = date(2026, 9, 17)
+    client = boto3.client('s3')
+    dim_path = f'{tmp_path}/dim.parquet'
+    pq.write_table(
+        pa.Table.from_pylist(
+            [
+                {
+                    'trip_id': '1012281',
+                    'stop_id': '200013',
+                    'stop_sequence': 1,
+                    'arrival_time': '07:30:00',
+                    'departure_time': '07:30:30',
+                    'shape_dist_traveled': None,
+                },
+                {
+                    'trip_id': '1012281',
+                    'stop_id': '200099',
+                    'stop_sequence': 2,
+                    'arrival_time': '25:15:00',
+                    'departure_time': '25:15:30',
+                    'shape_dist_traveled': None,
+                },
+            ],
+            schema=SCHEDULED_STOP_TIME_SCHEMA,
+        ),
+        dim_path,
+    )
+    client.upload_file(
+        dim_path, _bucket,
+        'curated/dim_scheduled_stop_time/valid_from=2026-09-01/'
+        'data.parquet',
+    )
+    trip_path = f'{tmp_path}/trip.parquet'
+    last_update = datetime(2026, 9, 17, 0, 0, tzinfo=UTC)
+    pq.write_table(
+        pa.Table.from_pylist(
+            [
+                {
+                    'service_date': '20260917',
+                    'trip_id': '1012281',
+                    'stop_id': '200013',
+                    'stop_sequence': 1,
+                    'route_id': '2447_160',
+                    'final_predicted_arrival_utc': last_update,
+                    'delay_s': 30,
+                    'final_predicted_departure_utc': None,
+                    'departure_delay_s': None,
+                    'last_update_at_utc': last_update,
+                    'n_updates': 1,
+                    'schedule_relationship': 'SCHEDULED',
+                    'trip_schedule_relationship': 'SCHEDULED',
+                    'had_vehicle': True,
+                    'lost_tracking': False,
+                    'last_observed_at_utc': last_update,
+                },
+                {
+                    'service_date': '20260917',
+                    'trip_id': '1012281',
+                    'stop_id': '200099',
+                    'stop_sequence': 2,
+                    'route_id': '2447_160',
+                    'final_predicted_arrival_utc': last_update,
+                    'delay_s': 30,
+                    'final_predicted_departure_utc': None,
+                    'departure_delay_s': None,
+                    'last_update_at_utc': last_update,
+                    'n_updates': 1,
+                    'schedule_relationship': 'SCHEDULED',
+                    'trip_schedule_relationship': 'SCHEDULED',
+                    'had_vehicle': True,
+                    'lost_tracking': False,
+                    'last_observed_at_utc': last_update,
+                },
+            ],
+            schema=TRIP_STOP_SCHEMA,
+        ),
+        trip_path,
+    )
+    client.upload_file(
+        trip_path, _bucket,
+        'curated/_partial/trip_stop/dt=2026-09-17/hour=00/data.parquet',
+    )
+    connection = duckdb.connect()
+    configure(connection=connection, endpoint=_s3_endpoint)
+    merge_trip_stops(
+        connection=connection,
+        bucket=_bucket,
+        service_date=service_date,
+        session=boto3.Session(),
+    )
+    body = client.get_object(
+        Bucket=_bucket,
+        Key='curated/fact_trip_stop/service_date=2026-09-17/data.parquet',
+    )['Body'].read()
+    table = pq.read_table(io.BytesIO(body))
+    by_sequence = dict(zip(
+        table.column('stop_sequence').to_pylist(),
+        table.column('scheduled_arrival_utc').to_pylist(),
+    ))
+    assert by_sequence[1] == datetime(2026, 9, 16, 21, 30, tzinfo=UTC)
+    assert by_sequence[2] == datetime(2026, 9, 17, 15, 15, tzinfo=UTC)

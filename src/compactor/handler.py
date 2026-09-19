@@ -9,8 +9,6 @@ the bill - every hour of every day, while producing identical output.
 """
 
 import os
-import resource
-import sys
 from collections import Counter
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
@@ -23,6 +21,7 @@ from aws_lambda_powertools.utilities.typing import LambdaContext
 from src.common.curation import CurationRepository
 from src.common.feed_decode import decode_feed
 from src.common.parquet import ParquetRepository
+from src.common.process import peak_rss_mb
 from src.common.raw_read import EXPECTED_OBJECTS, RawReader
 from src.common.types_ import CurationJob, CurationRecord, Feed
 from src.compactor.positions import (
@@ -244,31 +243,6 @@ def build_record(
         'peak_rss_mb': peak_rss_mb(),
         'error': None,
     }
-
-
-def peak_rss_mb() -> int:
-    """Report this process's peak resident set size in megabytes.
-
-    Recorded on every run because the memory envelope cost Phase 1 the
-    most time, and because the streaming requirement above has no
-    guard other than measurement.
-
-    Returns
-    -------
-    int
-        Peak RSS in MB.
-
-    Notes
-    -----
-    Linux reports ``ru_maxrss`` in kilobytes; macOS reports it in
-    bytes. Dividing unconditionally by 1024 is roughly 1000x wrong on
-    one of the two platforms, so the divisor is chosen by
-    ``sys.platform``.
-    """
-    usage = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    if sys.platform == 'darwin':
-        return usage // 1024**2
-    return usage // 1024
 
 
 @logger.inject_lambda_context

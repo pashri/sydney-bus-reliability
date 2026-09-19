@@ -61,6 +61,8 @@ def trip_row(
     n_updates: int,
     delay: int,
     last_update: datetime,
+    last_observed: datetime | None = None,
+    stop_sequence: int = 1,
 ) -> dict[str, object]:
     """Build one partial trip-stop row.
 
@@ -74,6 +76,11 @@ def trip_row(
         Predicted arrival delay.
     last_update : datetime
         When the last real observation was made.
+    last_observed : datetime | None
+        When the key was last observed at all, real or echo. Defaults
+        to ``last_update`` when no dropout is being modelled.
+    stop_sequence : int
+        Position of this call in the trip.
 
     Returns
     -------
@@ -85,7 +92,7 @@ def trip_row(
         'service_date': '20260917',
         'trip_id': '1012281',
         'stop_id': '200013',
-        'stop_sequence': 1,
+        'stop_sequence': stop_sequence,
         'route_id': '2447_160',
         'final_predicted_arrival_utc': datetime(
             2026, 9, 17, 0, 0, tzinfo=UTC,
@@ -99,7 +106,7 @@ def trip_row(
         'trip_schedule_relationship': 'SCHEDULED',
         'had_vehicle': True,
         'lost_tracking': False,
-        'last_observed_at_utc': last_update,
+        'last_observed_at_utc': last_observed or last_update,
     }
 
 
@@ -225,20 +232,20 @@ def test_no_join_fan_out(
     assert len(result) == 1
 
 
-def test_lost_tracking_propagates(
+def test_lost_tracking_reflects_the_final_dropout(
     _connection: duckdb.DuckDBPyConnection,
     tmp_path: Path,
 ) -> None:
-    """A dropout in any partial marks the merged row."""
+    """A key whose day ends on an echo after its last real call is lost."""
     rows = [
         trip_row(
             hour=20,
             n_updates=1,
             delay=60,
             last_update=datetime(2026, 9, 16, 20, 30, tzinfo=UTC),
+            last_observed=datetime(2026, 9, 16, 20, 45, tzinfo=UTC),
         ),
     ]
-    rows[0]['lost_tracking'] = True
     glob = write_partials(
         tmp_path=tmp_path, rows=rows, schema=TRIP_STOP_SCHEMA,
     )
@@ -249,6 +256,120 @@ def test_lost_tracking_propagates(
     merged = dict(zip(columns, result[0]))
     assert merged['lost_tracking']
     assert not merged['is_reliable']
+
+
+def test_never_reported_key_is_not_lost_tracking(
+    _connection: duckdb.DuckDBPyConnection,
+    tmp_path: Path,
+) -> None:
+    """A key with no real observation at all is never-reported, not lost."""
+    row = trip_row(
+        hour=20,
+        n_updates=0,
+        delay=60,
+        last_update=datetime(2026, 9, 16, 20, 30, tzinfo=UTC),
+        last_observed=datetime(2026, 9, 16, 20, 45, tzinfo=UTC),
+    )
+    row['delay_s'] = None
+    row['final_predicted_arrival_utc'] = None
+    row['last_update_at_utc'] = None
+    row['had_vehicle'] = False
+    glob = write_partials(
+        tmp_path=tmp_path, rows=[row], schema=TRIP_STOP_SCHEMA,
+    )
+    result = _connection.execute(
+        TRIP_STOP_MERGE, {'partials': glob, 'service_date': '20260917'},
+    ).fetchall()
+    columns = [d[0] for d in _connection.description]
+    merged = dict(zip(columns, result[0]))
+    assert not merged['lost_tracking']
+    assert not merged['had_vehicle']
+
+
+def test_a_later_real_hour_clears_an_earlier_dropout(
+    _connection: duckdb.DuckDBPyConnection,
+    tmp_path: Path,
+) -> None:
+    """NO_DATA late in hour 20 then real SCHEDULED in hour 21 must
+    end reliable.
+
+    Regression for BOOL_OR(lost_tracking) across per-hour partials:
+    that formulation ORs the hour-20 dropout across the whole day and
+    wrongly disqualifies the hour-21 arrival, even though hour 21 is a
+    genuine, later real observation. Discrimination check performed
+    manually against the pre-fix BOOL_OR SQL confirmed it returns
+    ``lost_tracking = True`` / ``is_reliable = False`` for this
+    fixture, while the MAX-based comparison here returns
+    ``lost_tracking = False`` / ``is_reliable = True``.
+    """
+    rows = [
+        trip_row(
+            hour=20,
+            n_updates=0,
+            delay=0,
+            last_update=datetime(2026, 9, 16, 20, 0, tzinfo=UTC),
+            last_observed=datetime(2026, 9, 16, 20, 55, tzinfo=UTC),
+        ),
+        trip_row(
+            hour=21,
+            n_updates=1,
+            delay=30,
+            last_update=datetime(2026, 9, 16, 21, 59, 30, tzinfo=UTC),
+            last_observed=datetime(2026, 9, 16, 21, 59, 30, tzinfo=UTC),
+        ),
+    ]
+    rows[0]['delay_s'] = None
+    rows[0]['final_predicted_arrival_utc'] = None
+    rows[0]['last_update_at_utc'] = None
+    rows[1]['final_predicted_arrival_utc'] = datetime(
+        2026, 9, 16, 22, 0, tzinfo=UTC,
+    )
+    glob = write_partials(
+        tmp_path=tmp_path, rows=rows, schema=TRIP_STOP_SCHEMA,
+    )
+    result = _connection.execute(
+        TRIP_STOP_MERGE, {'partials': glob, 'service_date': '20260917'},
+    ).fetchall()
+    columns = [d[0] for d in _connection.description]
+    merged = dict(zip(columns, result[0]))
+    assert not merged['lost_tracking']
+    assert merged['is_reliable']
+
+
+def test_loop_route_stop_sequence_keeps_both_calls(
+    _connection: duckdb.DuckDBPyConnection,
+    tmp_path: Path,
+) -> None:
+    """Same trip, same stop_id, two stop_sequences: two merged rows."""
+    rows = [
+        trip_row(
+            hour=20,
+            n_updates=1,
+            delay=60,
+            last_update=datetime(2026, 9, 16, 20, 30, tzinfo=UTC),
+            stop_sequence=3,
+        ),
+        trip_row(
+            hour=20,
+            n_updates=1,
+            delay=300,
+            last_update=datetime(2026, 9, 16, 20, 45, tzinfo=UTC),
+            stop_sequence=17,
+        ),
+    ]
+    glob = write_partials(
+        tmp_path=tmp_path, rows=rows, schema=TRIP_STOP_SCHEMA,
+    )
+    result = _connection.execute(
+        TRIP_STOP_MERGE, {'partials': glob, 'service_date': '20260917'},
+    ).fetchall()
+    assert len(result) == 2
+    columns = [d[0] for d in _connection.description]
+    by_sequence = {
+        row['stop_sequence']: row['delay_s']
+        for row in (dict(zip(columns, r)) for r in result)
+    }
+    assert by_sequence == {3: 60, 17: 300}
 
 
 def test_null_delay_is_not_reliable(

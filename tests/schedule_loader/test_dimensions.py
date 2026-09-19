@@ -112,6 +112,34 @@ def test_stop_time_rows_keep_past_midnight_times_verbatim() -> None:
     assert batch.column('arrival_time').to_pylist() == ['25:15:00']
 
 
+def test_stop_time_rows_coerce_stop_sequence_to_int() -> None:
+    """stop_sequence is an ordinal and must sort numerically.
+
+    A 12-stop trip written with a lexicographic string sort would put
+    stop 10 before stop 2; stored as int32, ``sorted()`` and true
+    numeric order agree.
+    """
+    header = (
+        'trip_id,arrival_time,departure_time,stop_id,stop_sequence,'
+        'shape_dist_traveled\n'
+    )
+    body = ''.join(
+        f'"1012281","25:1{n}:00","25:1{n}:30","20001{n}","{n}","0.00"\n'
+        for n in range(12)
+    )
+    archive = build_zip(members={'stop_times.txt': header + body})
+    batch = next(dimension_batches(
+        archive=archive,
+        dimension=Dimension.SCHEDULED_STOP_TIME,
+        batch_size=20,
+    ))
+    sequence = batch.column('stop_sequence').to_pylist()
+    assert sequence == list(range(12))
+    assert sequence == sorted(sequence)
+    stringified = [str(n) for n in sequence]
+    assert stringified != sorted(stringified)
+
+
 def test_stop_time_rows_carry_shape_dist_traveled() -> None:
     """Distance along the shape places a stop exactly on the polyline."""
     archive = build_zip(members={'stop_times.txt': STOP_TIMES})
@@ -141,6 +169,31 @@ def test_shape_rows_carry_present_dist_traveled() -> None:
         archive=archive, dimension=Dimension.SHAPE, batch_size=10,
     ))
     assert batch.column('shape_dist_traveled').to_pylist() == [0.0]
+
+
+def test_shape_rows_coerce_shape_pt_sequence_to_int() -> None:
+    """A 250-vertex polyline must come back in true numeric order.
+
+    Sorted as strings, vertex 2 would land at index 111 instead of 1,
+    turning the route geometry into a zigzag.
+    """
+    header = (
+        'shape_id,shape_pt_lat,shape_pt_lon,shape_pt_sequence,'
+        'shape_dist_traveled\n'
+    )
+    body = ''.join(
+        f'"80047","-32.7","152.1","{n}","{float(n)}"\n'
+        for n in range(250)
+    )
+    archive = build_zip(members={'shapes.txt': header + body})
+    batch = next(dimension_batches(
+        archive=archive, dimension=Dimension.SHAPE, batch_size=300,
+    ))
+    sequence = batch.column('shape_pt_sequence').to_pylist()
+    assert sequence == list(range(250))
+    assert sequence == sorted(sequence)
+    stringified = [str(n) for n in sequence]
+    assert stringified != sorted(stringified)
 
 
 def test_calendar_rows_carry_validity_window() -> None:

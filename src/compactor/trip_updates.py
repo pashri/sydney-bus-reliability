@@ -1,4 +1,10 @@
-"""Reduction of trip updates to one row per (trip, stop).
+"""Reduction of trip updates to one row per (trip, stop, stop_sequence).
+
+The key includes ``stop_sequence`` because loop and shuttle routes
+genuinely call the same ``stop_id`` twice on one trip; keying on
+``stop_id`` alone collapses those two real calls into one.
+``stop_sequence`` is 100% populated in the feed (measured), so it is
+safe to use as part of the key.
 
 Consecutive 60-second polls overlap 99.3%, so almost every poll is a
 full restatement of the last. Measured over one peak hour, 13,041,479
@@ -66,7 +72,7 @@ TRIP_STOP_FIELDS: Final[list[pa.Field[Any]]] = [
 ]
 TRIP_STOP_SCHEMA: Final[pa.Schema] = pa.schema(TRIP_STOP_FIELDS)
 
-Key = tuple[str, str, str]
+Key = tuple[str, str, str, int | None]
 
 
 def stop_event(*, stop: Any, name: str) -> tuple[Any, Any]:
@@ -176,7 +182,10 @@ class TripStopReducer:
             When this observation was made.
         """
         key: Key = (
-            update.trip.start_date, update.trip.trip_id, stop.stop_id,
+            update.trip.start_date,
+            update.trip.trip_id,
+            stop.stop_id,
+            optional_field(message=stop, name='stop_sequence'),
         )
         row = self.rows.setdefault(
             key, self.blank(update=update, stop=stop),

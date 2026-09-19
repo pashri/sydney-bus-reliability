@@ -289,6 +289,58 @@ def test_skipped_counts_as_a_real_observation() -> None:
     assert batch.column('n_updates').to_pylist() == [1]
 
 
+def build_two_call_feed() -> object:
+    """Build a FeedMessage of one trip calling the same stop twice.
+
+    Returns
+    -------
+    object
+        A populated FeedMessage with two StopTimeUpdates sharing a
+        ``stop_id`` but carrying distinct ``stop_sequence`` values.
+    """
+    feed = gtfs_realtime_pb2.FeedMessage()
+    feed.header.gtfs_realtime_version = '1.0'
+    entity = feed.entity.add()
+    entity.id = 'tu-loop'
+    update = entity.trip_update
+    update.trip.trip_id = '1012281'
+    update.trip.route_id = '2447_160'
+    update.trip.start_date = '20260917'
+    update.vehicle.id = '8183_a'
+    update.timestamp = 1789592400
+    first = update.stop_time_update.add()
+    first.stop_id = '200013'
+    first.stop_sequence = 3
+    first.schedule_relationship = SCHEDULED
+    first.arrival.time = 1789592700
+    first.arrival.delay = 60
+    second = update.stop_time_update.add()
+    second.stop_id = '200013'
+    second.stop_sequence = 17
+    second.schedule_relationship = SCHEDULED
+    second.arrival.time = 1789595700
+    second.arrival.delay = 300
+    return feed
+
+
+def test_loop_route_keeps_both_calls_at_the_same_stop() -> None:
+    """A trip calling the same stop_id twice must not collapse to one row.
+
+    The key must include stop_sequence, since keying on stop_id alone
+    would overwrite the first call with the second.
+    """
+    reducer = TripStopReducer()
+    reducer.add(feed=build_two_call_feed(), fetched_at=FETCHED)
+    batches = list(reducer.batches())
+    assert sum(batch.num_rows for batch in batches) == 2
+    rows = {
+        row['stop_sequence']: row['delay_s']
+        for batch in batches
+        for row in batch.to_pylist()
+    }
+    assert rows == {3: 60, 17: 300}
+
+
 def test_service_date_comes_from_trip_start_date() -> None:
     """start_date is authoritative, not the poll's calendar date."""
     reducer = TripStopReducer()

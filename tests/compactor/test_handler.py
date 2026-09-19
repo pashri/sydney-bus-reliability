@@ -2,14 +2,12 @@
 
 import gzip
 import os
-import resource
 from datetime import UTC, datetime
 
 import boto3
 import pytest
 from google.transit import gtfs_realtime_pb2
 
-from src.compactor import handler as handler_module
 from src.compactor.handler import handler, partial_key, target_hour
 
 FETCHED_POSITION: datetime = datetime(2026, 9, 16, 21, 0, 4, tzinfo=UTC)
@@ -150,29 +148,3 @@ def test_handler_raises_on_completely_empty_hour(_bucket: str) -> None:
     os.environ['BUCKET_NAME'] = _bucket
     with pytest.raises(RuntimeError):
         handler({'hour': '2026-09-16T21:00:00+00:00'}, _Context())
-
-
-def test_peak_rss_mb_divides_by_1024_on_linux(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Linux reports ru_maxrss in kilobytes."""
-    monkeypatch.setattr(handler_module.sys, 'platform', 'linux')
-    monkeypatch.setattr(
-        resource,
-        'getrusage',
-        lambda who: type('_Usage', (), {'ru_maxrss': 2048 * 1024})(),
-    )
-    assert handler_module.peak_rss_mb() == 2048
-
-
-def test_peak_rss_mb_divides_by_1024_squared_on_darwin(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """macOS reports ru_maxrss in bytes."""
-    monkeypatch.setattr(handler_module.sys, 'platform', 'darwin')
-    monkeypatch.setattr(
-        resource,
-        'getrusage',
-        lambda who: type('_Usage', (), {'ru_maxrss': 2048 * 1024**2})(),
-    )
-    assert handler_module.peak_rss_mb() == 2048
