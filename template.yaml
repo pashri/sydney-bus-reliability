@@ -51,6 +51,14 @@ Resources:
             Status: Enabled
             Prefix: raw/
             ExpirationInDays: 30  # we'll change to 7 after compactor is made
+          # The merger folds these into fact_collector_run daily, and
+          # that Parquet is kept. Expiring the JSONL also bounds how
+          # many objects a merge has to list, which would otherwise
+          # grow by about 1,440 a day for the life of the project.
+          - Id: ExpireCollectorRunJsonl
+            Status: Enabled
+            Prefix: curated/collector_run/
+            ExpirationInDays: 30
           - Id: ExpirePartials
             Status: Enabled
             Prefix: curated/_partial/
@@ -374,6 +382,11 @@ Resources:
         out of the shared requirements because a runtime dependency
         is bundled into every function's package, which took the
         schedule loader to 416 MB against a 250 MB limit.
+      # Built by layers/duckdb/Makefile, which sam build runs itself.
+      # BuildArchitecture is set because it defaults to x86_64, which
+      # would ship an x86 binary to an arm64 function.
+      BuildMethod: makefile
+      BuildArchitecture: arm64
     Type: AWS::Serverless::LayerVersion
     Properties:
       LayerName: sydney-bus-reliability-duckdb
