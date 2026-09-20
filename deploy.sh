@@ -50,12 +50,7 @@ sam validate --region="${REGION}"
 uv export --no-dev --no-emit-project --no-color \
   --format requirements-txt -o src/requirements.txt
 
-# The DuckDB layer's own pin, taken from the lockfile rather than
-# written out anywhere. A literal would be a second place to update on
-# every duckdb bump, and forgetting it would silently ship a layer whose
-# Parquet and httpfs behaviour has drifted from what the tests ran
-# against. sam build reads it from layers/duckdb/Makefile, which it runs
-# itself because the layer declares BuildMethod: makefile.
+# Create the DuckDB layer using the version from pyproject.toml
 uv export --all-groups --no-emit-project --no-hashes --no-color \
   --format requirements-txt \
   | grep '^duckdb==' > layers/duckdb/requirements.txt
