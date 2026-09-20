@@ -511,8 +511,48 @@ Resources:
       TreatMissingData: notBreaching
       AlarmActions: [!Ref AlertTopic]
 
+  CheckerLogGroup:
+    Metadata:
+      Description: Log group for the checker function, retained 30 days.
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/sydney-bus-reliability-checker
+      RetentionInDays: 30
+
+  CheckerFunction:
+    Type: AWS::Serverless::Function
+    DependsOn: CheckerLogGroup
+    Properties:
+      Description: >-
+        Read-only health check over the curated layer, invoked on
+        demand. Reports the collector's polling and the curation
+        functions' runs for a window of Sydney days, and forms no
+        opinion about whether a figure is good.
+      FunctionName: sydney-bus-reliability-checker
+      CodeUri: src/
+      Handler: checker.handler.handler
+      MemorySize: 1024
+      Timeout: 120
+      # No ReservedConcurrentExecutions: account quota of 10 forbids it.
+      Layers:
+        - !Ref DuckdbLayer
+      # DuckDB only. The check reads Parquet and JSON through DuckDB
+      # and never builds an Arrow table, so it needs no pyarrow.
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref DataBucket
+          POWERTOOLS_SERVICE_NAME: checker
+          POWERTOOLS_LOG_LEVEL: INFO
+      Policies:
+        - S3ReadPolicy:
+            BucketName: !Ref DataBucket
+      # No Events and no silent alarm: this runs when asked, so no
+      # invocations for a day is its normal state, not a fault.
+
 Outputs:
   BucketName:
     Value: !Ref DataBucket
   CollectorFunctionName:
     Value: !Ref CollectorFunction
+  CheckerFunctionName:
+    Value: !Ref CheckerFunction

@@ -1,4 +1,8 @@
 # pylint: disable=too-many-lines
+# Superseded by the checker Lambda, which this shares its
+# summarising logic with. Kept only to check the new function
+# against, and deleted once it agrees.
+# pylint: disable=duplicate-code
 """Daily visibility into the live collector's S3 output.
 
 Run locally, read-only, against the live bucket, from the repo root::
