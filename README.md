@@ -100,11 +100,10 @@ seconds in region, twenty minutes from another continent.
 
 ## Scripts
 
-Four tools under `scripts/`, all run from the repo root as modules so
+Three tools under `scripts/`, all run from the repo root as modules so
 they can import `src/`:
 
     uv run python -m scripts.check_pipeline --date 2026-09-15
-    uv run python -m scripts.check_collection --date 2026-09-15
     uv run python -m scripts.verify_feeds
     uv run python -m scripts.check_layer_parity
 
@@ -142,7 +141,3 @@ partitions are missing, the row and duplicate counters, peak memory and
 errors. Expected compactor runs come from the day's real length, so a
 23- or 25-hour day across a daylight-saving transition does not read as
 a missing hour.
-
-`check_collection.py` is the checker's predecessor and is superseded by
-it. It is kept only until the deployed function has been checked
-against it on real days, and then deleted.

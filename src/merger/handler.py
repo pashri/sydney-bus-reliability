@@ -167,9 +167,9 @@ def merge_collector_run(
     """Fold one Sydney day of collector JSONL into a Parquet table.
 
     Written to ``fact_collector_run``, a separate prefix. The source
-    JSONL under ``collector_run`` is left in place, because the
-    collector keeps appending to it and ``check_collection.py`` reads
-    it directly.
+    JSONL under ``collector_run`` is left in place: the collector
+    keeps appending to it, and it is kept far longer than a partial,
+    so a day can be rebuilt after its partials have expired.
 
     The source is partitioned by UTC fetch date and the output by
     Sydney calendar date, under ``collection_date`` rather than
