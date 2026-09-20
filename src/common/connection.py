@@ -1,12 +1,6 @@
-"""Preparing a DuckDB connection for the service-day merge.
+"""Preparing a DuckDB connection to read the curated layer."""
 
-DuckDB sizes its threads and memory from the machine it detects, which
-in a container can be the host rather than the slice the function was
-given. Left alone it can run more workers than there is CPU for, and
-believe it has memory it does not have, so it never spills before the
-runtime kills the process.
-"""
-
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
@@ -28,27 +22,37 @@ AWS_EXTENSION: Final[Path] = Path(
 ``CREATE SECRET ... PROVIDER credential_chain`` lives in this
 extension, not in httpfs. Loading httpfs from the layer turns
 autoloading off, so aws has to be loaded explicitly or creating the
-secret fails and every merge dies before reading a row.
+secret fails and every read dies before returning a row.
 """
-
-DUCKDB_THREADS: Final[int] = 2
-"""Worker threads.
-
-The function's memory allocation buys it about one vCPU, and DuckDB
-sizes its own pool from the machine it detects rather than from that.
-"""
-
-DUCKDB_MEMORY_LIMIT: Final[str] = '2200MB'
-"""Headroom below the function's allocation, so DuckDB spills first."""
 
 DUCKDB_TEMP_DIRECTORY: Final[str] = '/tmp'
 """Where spilled data goes. The only writable path on Lambda."""
 
 
+@dataclass(frozen=True, slots=True)
+class DuckDbLimits:
+    """What one function allows DuckDB to use.
+
+    Sized per function rather than shared, since a function that sorts
+    a service day and one that counts a day of audit rows need very
+    different room.
+
+    Attributes
+    ----------
+    threads : int
+        Worker threads to allow.
+    memory_limit : str
+        Memory ceiling, as a DuckDB size string such as ``'700MB'``.
+    """
+
+    threads: int
+    memory_limit: str
+
 
 def configure(
     *,
     connection: duckdb.DuckDBPyConnection,
+    limits: DuckDbLimits,
     endpoint: str | None = None,
 ) -> None:
     """Prepare a DuckDB connection for S3 access.
@@ -57,6 +61,8 @@ def configure(
     ----------
     connection : duckdb.DuckDBPyConnection
         Connection to configure.
+    limits : DuckDbLimits
+        What this function allows DuckDB to use.
     endpoint : str | None
         Override S3 endpoint, host[:port] only. A test seam, never
         set in production. DuckDB's httpfs opens its own sockets, so
@@ -64,18 +70,17 @@ def configure(
         a real local moto server instead.
     """
     load_extensions(connection=connection)
-    apply_limits(connection=connection)
+    apply_limits(connection=connection, limits=limits)
     create_s3_secret(connection=connection, endpoint=endpoint)
 
 
 def load_extensions(*, connection: duckdb.DuckDBPyConnection) -> None:
-    """Load the extensions the merge SQL needs.
+    """Load the extensions an ``s3://`` read needs.
 
     ``httpfs`` backs every ``s3://`` read and write, and ``aws``
     supplies the ``credential_chain`` secret provider. ``icu`` backs
-    ``AT TIME ZONE`` with a named zone, which resolves
-    ``scheduled_arrival_utc``; it is compiled into the DuckDB wheel and
-    loads without a download.
+    ``AT TIME ZONE`` with a named zone; it is compiled into the DuckDB
+    wheel and loads without a download.
 
     The layer ships both so that a run never depends on DuckDB's
     extension repository being reachable. Off Lambda the layer is
@@ -97,8 +102,12 @@ def load_extensions(*, connection: duckdb.DuckDBPyConnection) -> None:
     connection.execute('LOAD icu;')
 
 
-def apply_limits(*, connection: duckdb.DuckDBPyConnection) -> None:
-    """Bound DuckDB's threads and memory to the function's allocation.
+def apply_limits(
+    *,
+    connection: duckdb.DuckDBPyConnection,
+    limits: DuckDbLimits,
+) -> None:
+    """Bound DuckDB's threads and memory to the caller's allocation.
 
     DuckDB sizes both from the machine it detects, which in a container
     can be the host rather than the slice the function was given. Left
@@ -110,9 +119,13 @@ def apply_limits(*, connection: duckdb.DuckDBPyConnection) -> None:
     ----------
     connection : duckdb.DuckDBPyConnection
         Connection to bound.
+    limits : DuckDbLimits
+        What this function allows DuckDB to use.
     """
-    connection.execute(f'SET threads = {DUCKDB_THREADS}')
-    connection.execute(f"SET memory_limit = '{DUCKDB_MEMORY_LIMIT}'")
+    connection.execute(f'SET threads = {limits.threads}')
+    connection.execute(
+        f"SET memory_limit = '{limits.memory_limit}'",
+    )
     connection.execute(
         f"SET temp_directory = '{DUCKDB_TEMP_DIRECTORY}'",
     )

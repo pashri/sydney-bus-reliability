@@ -17,9 +17,10 @@ from datetime import UTC, datetime
 import duckdb
 from google.transit import gtfs_realtime_pb2
 
+from common.connection import configure
 from common.parquet import ParquetRepository
 from compactor.trip_updates import TRIP_STOP_SCHEMA, TripStopReducer
-from merger.handler import configure
+from merger.handler import DUCKDB_LIMITS
 from merger.merge_sql import TRIP_STOP_MERGE
 
 FETCHED: datetime = datetime(2026, 9, 16, 21, 0, 34, tzinfo=UTC)
@@ -72,7 +73,10 @@ def test_compactor_output_round_trips_into_the_merger(
     assert written == 1
 
     connection = duckdb.connect()
-    configure(connection=connection, endpoint=_s3_endpoint)
+    configure(
+        connection=connection, limits=DUCKDB_LIMITS,
+        endpoint=_s3_endpoint,
+    )
     glob = (
         f's3://{_bucket}/curated/_partial/trip_stop/'
         f'dt=*/hour=*/data.parquet'

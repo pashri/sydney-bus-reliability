@@ -12,13 +12,14 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+from common.collector_run import COLLECTOR_RUN_COLUMNS
+from common.connection import configure, create_s3_secret, load_extensions
 from common.service_day import merge_window
 from common.types_ import RunRecord
 from compactor.positions import POSITION_SCHEMA
 from compactor.trip_updates import TRIP_STOP_SCHEMA
-from merger.connection import configure, create_s3_secret, load_extensions
 from merger.handler import (
-    COLLECTOR_RUN_COLUMNS,
+    DUCKDB_LIMITS,
     MergeTable,
     handler,
     merge_trip_stops,
@@ -392,9 +393,9 @@ def test_load_extensions_prefers_the_baked_httpfs(
     staging.execute('INSTALL httpfs;')
     staging.execute('INSTALL aws;')
     baked = next(tmp_path.glob('*/*/httpfs.duckdb_extension'))
-    monkeypatch.setattr('merger.connection.HTTPFS_EXTENSION', baked)
+    monkeypatch.setattr('common.connection.HTTPFS_EXTENSION', baked)
     monkeypatch.setattr(
-        'merger.connection.AWS_EXTENSION',
+        'common.connection.AWS_EXTENSION',
         next(tmp_path.glob('*/*/aws.duckdb_extension')),
     )
 
@@ -430,11 +431,11 @@ def test_baked_extensions_still_allow_the_s3_secret(
     staging.execute('INSTALL httpfs;')
     staging.execute('INSTALL aws;')
     monkeypatch.setattr(
-        'merger.connection.HTTPFS_EXTENSION',
+        'common.connection.HTTPFS_EXTENSION',
         next(tmp_path.glob('*/*/httpfs.duckdb_extension')),
     )
     monkeypatch.setattr(
-        'merger.connection.AWS_EXTENSION',
+        'common.connection.AWS_EXTENSION',
         next(tmp_path.glob('*/*/aws.duckdb_extension')),
     )
 
@@ -458,7 +459,10 @@ def test_configure_resolves_a_named_timezone(
     would be an hour out for half the year.
     """
     connection = duckdb.connect()
-    configure(connection=connection, endpoint=_s3_endpoint)
+    configure(
+        connection=connection, limits=DUCKDB_LIMITS,
+        endpoint=_s3_endpoint,
+    )
     resolved = connection.execute(
         "SELECT TIMESTAMP '2026-04-05 09:00:00' "
         "AT TIME ZONE 'Australia/Sydney'",
@@ -689,7 +693,10 @@ def test_merge_trip_stops_resolves_scheduled_arrival(
         'curated/_partial/trip_stop/dt=2026-09-17/hour=00/data.parquet',
     )
     connection = duckdb.connect()
-    configure(connection=connection, endpoint=_s3_endpoint)
+    configure(
+        connection=connection, limits=DUCKDB_LIMITS,
+        endpoint=_s3_endpoint,
+    )
     merge_trip_stops(
         connection=connection,
         bucket=_bucket,

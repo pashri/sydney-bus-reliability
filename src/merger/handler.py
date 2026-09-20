@@ -20,14 +20,24 @@ import duckdb
 from aws_lambda_powertools import Logger
 from aws_lambda_powertools.utilities.typing import LambdaContext
 
+from common.collector_run import collector_run_query, source_day_globs
+from common.connection import DuckDbLimits, configure
 from common.curation import CurationRepository
 from common.process import peak_rss_mb
-from common.service_day import SYDNEY, merge_window, service_date_for
+from common.service_day import merge_window, service_date_for
 from common.types_ import CurationJob, CurationRecord
-from merger.connection import configure
 from merger.merge_sql import POSITION_MERGE, build_trip_stop_query
 
 logger = Logger()
+
+DUCKDB_LIMITS: Final[DuckDbLimits] = DuckDbLimits(
+    threads=2, memory_limit='2200MB',
+)
+"""Room for the merge.
+
+The allocation buys about one vCPU, and the ceiling sits below the
+function's own so DuckDB spills to disk before the runtime kills it.
+"""
 
 PARTIAL_PREFIX: Final[str] = 'curated/_partial'
 
@@ -147,110 +157,6 @@ def target_service_date(
     return service_date_for(instant=now) - timedelta(days=1)
 
 
-COLLECTOR_RUN_PREFIX: Final[str] = 'curated/collector_run/'
-
-COLLECTOR_RUN_COLUMNS: Final[str] = (
-    "{feed: 'VARCHAR', fetched_at_utc: 'VARCHAR',"
-    " received_at_utc: 'VARCHAR', rtt_s: 'DOUBLE',"
-    " server_date_utc: 'VARCHAR', skew_s: 'DOUBLE',"
-    " status_code: 'INTEGER', body_bytes: 'BIGINT', error: 'VARCHAR'}"
-)
-"""Every ``RunRecord`` field, typed for DuckDB's JSON reader.
-
-Declared rather than inferred. Inference reads the same column as a
-timestamp on one day and a string on the next, depending on whether any
-value carries fractional seconds and whether the whole column is null,
-which makes both the stored type and the day filter unstable.
-
-Timestamps are read as text and cast once, so a filter never depends on
-what the reader guessed.
-"""
-
-
-def source_day_globs(
-    *,
-    client: Any,
-    bucket: str,
-    service_date: date,
-) -> list[str]:
-    """List globs for the UTC days one Sydney service day can touch.
-
-    Only days with at least one object are returned. DuckDB raises on a
-    glob-list entry matching no files, which the earliest service date
-    would otherwise hit, having no preceding UTC partition.
-
-    Naming the two days beats globbing ``dt=*`` and filtering. Both read
-    the same rows, but the wildcard makes S3 list every day ever
-    collected first, so the merge would slow down for the life of the
-    project rather than staying flat.
-
-    Parameters
-    ----------
-    client : Any
-        A boto3 S3 client.
-    bucket : str
-        Bucket holding the curated layer.
-    service_date : date
-        The Sydney service date being assembled.
-
-    Returns
-    -------
-    list[str]
-        One ``s3://`` glob per UTC day that exists.
-    """
-    days = (service_date - timedelta(days=1), service_date)
-    prefixes = (
-        f'{COLLECTOR_RUN_PREFIX}dt={day:%Y-%m-%d}/' for day in days
-    )
-    return [
-        f's3://{bucket}/{prefix}*.jsonl'
-        for prefix in prefixes
-        if client.list_objects_v2(
-            Bucket=bucket, Prefix=prefix, MaxKeys=1,
-        ).get('KeyCount')
-    ]
-
-
-def collector_run_query(*, globs: list[str]) -> str:
-    """Build the query cutting one Sydney day out of the audit JSONL.
-
-    Parameters
-    ----------
-    globs : list[str]
-        One ``s3://`` glob per UTC day to read.
-
-    Returns
-    -------
-    str
-        A query selecting one Sydney day's rows, with each timestamp
-        parsed to an instant.
-    """
-    source = ', '.join(f"'{glob}'" for glob in globs)
-    return f"""
-    SELECT
-        feed,
-        CAST(fetched_at_utc AS TIMESTAMPTZ) AS fetched_at_utc,
-        CAST(received_at_utc AS TIMESTAMPTZ) AS received_at_utc,
-        rtt_s,
-        CAST(server_date_utc AS TIMESTAMPTZ) AS server_date_utc,
-        skew_s,
-        status_code,
-        body_bytes,
-        error
-    FROM read_json(
-        [{source}],
-        columns = {COLLECTOR_RUN_COLUMNS}
-    )
-    WHERE CAST(fetched_at_utc AS TIMESTAMPTZ) >= (
-          CAST($day AS TIMESTAMP) AT TIME ZONE '{SYDNEY.key}'
-      )
-      AND CAST(fetched_at_utc AS TIMESTAMPTZ) < (
-          CAST($day AS TIMESTAMP) + INTERVAL 1 DAY
-      ) AT TIME ZONE '{SYDNEY.key}'
-    ORDER BY fetched_at_utc, feed
-    """
-
-
 def merge_collector_run(
     *,
     bucket: str,
@@ -269,9 +175,10 @@ def merge_collector_run(
     Sydney calendar date, under ``collection_date`` rather than
     ``service_date``: the collector polls on the clock, so its day is
     midnight to midnight and not the timetable's day. One output day
-    is cut from the two source partitions it spans. The cut is made with a named timezone rather
-    than a fixed offset, because a Sydney day is 23 or 25 hours long
-    across a daylight-saving transition.
+    is cut from the two source partitions it spans. The cut is made
+    with a named timezone rather than a fixed offset, because a
+    Sydney day is 23 or 25 hours long across a daylight-saving
+    transition.
 
     Parameters
     ----------
@@ -301,7 +208,9 @@ def merge_collector_run(
         )
         return 0
     connection = duckdb.connect()
-    configure(connection=connection, endpoint=endpoint)
+    configure(
+        connection=connection, limits=DUCKDB_LIMITS, endpoint=endpoint,
+    )
     target = (
         f's3://{bucket}/curated/fact_collector_run/'
         f'collection_date={service_date:%Y-%m-%d}/data.parquet'
@@ -871,7 +780,9 @@ def handler(
         require_partials(coverage=coverage, service_date=service_date)
         warn_on_short_day(coverage=coverage)
     connection = duckdb.connect()
-    configure(connection=connection, endpoint=endpoint)
+    configure(
+        connection=connection, limits=DUCKDB_LIMITS, endpoint=endpoint,
+    )
     collector_rows = 0
     if MergeTable.COLLECTOR_RUN in tables:
         collector_rows = merge_collector_run(
