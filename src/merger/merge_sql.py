@@ -40,7 +40,7 @@ totals AS (
         trip_id,
         stop_id,
         stop_sequence,
-        SUM(n_updates) AS n_updates,
+        CAST(SUM(n_updates) AS INTEGER) AS n_updates,
         BOOL_OR(had_vehicle) AS had_vehicle,
         MAX(last_observed_at_utc) AS final_last_observed_at_utc
     FROM partials
@@ -77,13 +77,14 @@ merged AS (
 )
 SELECT
     merged.*,
-    (
+    COALESCE(
         merged.delay_s IS NOT NULL
         AND NOT merged.lost_tracking
         AND merged.last_update_at_utc >= (
             merged.final_predicted_arrival_utc
             - INTERVAL '{RELIABLE_LEAD_SECONDS}' SECOND
-        )
+        ),
+        false
     ) AS is_reliable
 FROM merged
 """
@@ -113,6 +114,15 @@ footers are read. They do not select the service day, which
 every day ever collected. ``dt`` and ``hour`` come from the partition
 path rather than the data, so they are excluded to keep the merged
 columns identical to the partial's own.
+
+``is_reliable`` is never NULL. A row can carry a delay with no
+predicted arrival time, and comparing against a missing time yields NULL
+rather than false, so the comparison is wrapped in ``COALESCE``. Nothing
+reading the column has to tell "not reliable" apart from "unknown".
+
+``n_updates`` is cast back to ``INTEGER``. ``SUM`` widens it to a type
+Parquet has no slot for, which lands in the file as a floating-point
+number unless it is narrowed again.
 
 The ``ROW_NUMBER()`` tiebreak is deterministic. Ties on
 ``last_update_at_utc``, usually both NULL for pre-departure echoes,

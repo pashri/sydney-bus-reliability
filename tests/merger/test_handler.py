@@ -13,13 +13,14 @@ import pyarrow.parquet as pq
 import pytest
 
 from common.service_day import merge_window
+from common.types_ import RunRecord
 from compactor.positions import POSITION_SCHEMA
 from compactor.trip_updates import TRIP_STOP_SCHEMA
+from merger.connection import configure, create_s3_secret, load_extensions
 from merger.handler import (
-    configure,
+    COLLECTOR_RUN_COLUMNS,
+    MergeTable,
     handler,
-    create_s3_secret,
-    load_extensions,
     merge_trip_stops,
     partial_hour_from_key,
     partition_bounds,
@@ -81,6 +82,277 @@ def test_merge_collector_run_folds_jsonl_to_parquet(
         bucket=_bucket, service_date=date(2026, 9, 17),
         endpoint=_s3_endpoint,
     ) == 3
+    written = client.list_objects_v2(
+        Bucket=_bucket, Prefix='curated/fact_collector_run/',
+    )
+    assert [item['Key'] for item in written['Contents']] == [
+        'curated/fact_collector_run/service_date=2026-09-17/data.parquet',
+    ]
+
+
+def collector_row(*, fetched_at: str) -> bytes:
+    """Build one collector audit line.
+
+    Parameters
+    ----------
+    fetched_at : str
+        ISO 8601 UTC timestamp for the fetch.
+
+    Returns
+    -------
+    bytes
+        One JSON Lines record.
+    """
+    return json.dumps({
+        'feed': 'vehiclepos',
+        'fetched_at_utc': fetched_at,
+        'received_at_utc': fetched_at,
+        'rtt_s': 0.5,
+        'server_date_utc': None,
+        'skew_s': None,
+        'status_code': 200,
+        'body_bytes': 1234,
+        'error': None,
+    }).encode() + b'\n'
+
+
+def put_collector_rows(
+    *,
+    bucket: str,
+    stamps: dict[str, list[str]],
+) -> None:
+    """Write audit lines into their UTC date partitions.
+
+    Parameters
+    ----------
+    bucket : str
+        Destination bucket.
+    stamps : dict[str, list[str]]
+        UTC date partition, mapped to the fetch timestamps in it.
+    """
+    client = boto3.client('s3')
+    for day, values in stamps.items():
+        for index, fetched_at in enumerate(values):
+            client.put_object(
+                Bucket=bucket,
+                Key=f'curated/collector_run/dt={day}/{index}.jsonl',
+                Body=collector_row(fetched_at=fetched_at),
+            )
+
+
+def test_collector_run_columns_cover_every_run_record_field() -> None:
+    """The declared column list must not drift from ``RunRecord``.
+
+    The reader is given an explicit schema, so a field added to the
+    record would otherwise be dropped silently on the way to Parquet.
+    """
+    declared = {
+        part.split(':')[0].strip()
+        for part in COLLECTOR_RUN_COLUMNS.strip('{}').split(',')
+    }
+    assert declared == set(RunRecord.__annotations__)
+
+
+def test_merge_collector_run_cuts_a_sydney_day_from_two_utc_days(
+    _bucket: str, _s3_endpoint: str,
+) -> None:
+    """One Sydney day spans two UTC partitions and excludes both edges.
+
+    Sydney is ten hours ahead in September, so 2026-09-17 runs from
+    2026-09-16T14:00Z to 2026-09-17T14:00Z.
+    """
+    put_collector_rows(bucket=_bucket, stamps={
+        '2026-09-16': [
+            '2026-09-16T13:59:59.999999+00:00',
+            '2026-09-16T14:00:00+00:00',
+        ],
+        '2026-09-17': [
+            '2026-09-17T13:59:59.999999+00:00',
+            '2026-09-17T14:00:00+00:00',
+        ],
+    })
+    os.environ['BUCKET_NAME'] = _bucket
+    from merger.handler import merge_collector_run
+
+    assert merge_collector_run(
+        bucket=_bucket, service_date=date(2026, 9, 17),
+        endpoint=_s3_endpoint,
+    ) == 2
+
+
+def test_merge_collector_run_follows_daylight_saving(
+    _bucket: str, _s3_endpoint: str,
+) -> None:
+    """The cut uses Sydney's offset on the day, not a fixed one.
+
+    Sydney moves to daylight saving on 2026-10-04, so that service day
+    runs 2026-10-03T14:00Z to 2026-10-04T13:00Z and is 23 hours long.
+    Holding the offset at ten hours would pull in the hour after it.
+    """
+    put_collector_rows(bucket=_bucket, stamps={
+        '2026-10-03': [
+            '2026-10-03T13:59:59.999999+00:00',
+            '2026-10-03T14:00:00+00:00',
+        ],
+        '2026-10-04': [
+            '2026-10-04T12:59:59.999999+00:00',
+            '2026-10-04T13:00:00+00:00',
+        ],
+    })
+    os.environ['BUCKET_NAME'] = _bucket
+    from merger.handler import merge_collector_run
+
+    assert merge_collector_run(
+        bucket=_bucket, service_date=date(2026, 10, 4),
+        endpoint=_s3_endpoint,
+    ) == 2
+
+
+def test_merge_collector_run_stores_timestamps_as_instants(
+    _bucket: str, _s3_endpoint: str,
+) -> None:
+    """Timestamp columns are typed, not left to the reader to guess.
+
+    Mixed fractional-second formats in one day make inference fall
+    back to text, so the types are declared and cast explicitly.
+    """
+    put_collector_rows(bucket=_bucket, stamps={'2026-09-16': [
+        '2026-09-16T23:00:00+00:00',
+        '2026-09-16T23:30:00.123456+00:00',
+    ]})
+    os.environ['BUCKET_NAME'] = _bucket
+    from merger.handler import merge_collector_run
+
+    assert merge_collector_run(
+        bucket=_bucket, service_date=date(2026, 9, 17),
+        endpoint=_s3_endpoint,
+    ) == 2
+    body = boto3.client('s3').get_object(
+        Bucket=_bucket,
+        Key='curated/fact_collector_run/service_date=2026-09-17/data.parquet',
+    )['Body'].read()
+    schema = pq.read_schema(io.BytesIO(body))
+    assert schema.field('fetched_at_utc').type == pa.timestamp('us', tz='UTC')
+    assert schema.field('status_code').type == pa.int32()
+
+
+def test_merge_collector_run_skips_a_day_with_no_source(
+    _bucket: str, _s3_endpoint: str,
+) -> None:
+    """A service day with neither source partition writes nothing.
+
+    DuckDB raises on a glob matching no files, so the days are checked
+    before the query is built rather than after it fails.
+    """
+    put_collector_rows(bucket=_bucket, stamps={
+        '2026-09-16': ['2026-09-16T23:00:00+00:00'],
+    })
+    os.environ['BUCKET_NAME'] = _bucket
+    from merger.handler import merge_collector_run
+
+    assert merge_collector_run(
+        bucket=_bucket, service_date=date(2026, 12, 25),
+        endpoint=_s3_endpoint,
+    ) == 0
+    written = boto3.client('s3').list_objects_v2(
+        Bucket=_bucket, Prefix='curated/fact_collector_run/',
+    )
+    assert written['KeyCount'] == 0
+
+
+def test_merge_collector_run_reads_only_the_two_days_it_needs(
+    _bucket: str, _s3_endpoint: str,
+) -> None:
+    """Days outside the service day are never opened.
+
+    An unrelated partition holds unparseable JSON. Naming the two days
+    it needs, rather than globbing every day and filtering, means the
+    merge never reads it.
+    """
+    put_collector_rows(bucket=_bucket, stamps={
+        '2026-09-16': ['2026-09-16T23:00:00+00:00'],
+        '2026-09-17': ['2026-09-17T02:00:00+00:00'],
+    })
+    boto3.client('s3').put_object(
+        Bucket=_bucket,
+        Key='curated/collector_run/dt=2026-01-01/broken.jsonl',
+        Body=b'this is not json at all {{{\n',
+    )
+    os.environ['BUCKET_NAME'] = _bucket
+    from merger.handler import merge_collector_run
+
+    assert merge_collector_run(
+        bucket=_bucket, service_date=date(2026, 9, 17),
+        endpoint=_s3_endpoint,
+    ) == 2
+
+
+def test_selected_tables_defaults_to_every_table() -> None:
+    """A scheduled event carries no list and assembles everything."""
+    from merger.handler import selected_tables
+
+    assert selected_tables(event={}) == frozenset(MergeTable)
+    assert selected_tables(event={'tables': []}) == frozenset(MergeTable)
+
+
+def test_selected_tables_narrows_to_the_named_ones() -> None:
+    """A re-run can ask for one table."""
+    from merger.handler import selected_tables
+
+    assert selected_tables(event={'tables': ['collector_run']}) == {
+        MergeTable.COLLECTOR_RUN,
+    }
+
+
+def test_selected_tables_rejects_an_unknown_name() -> None:
+    """A typo must not quietly assemble nothing."""
+    from merger.handler import selected_tables
+
+    with pytest.raises(ValueError, match='unknown table'):
+        selected_tables(event={'tables': ['fact_trip_stop']})
+
+
+def test_require_partials_refuses_a_day_with_none_left() -> None:
+    """An expired window must not overwrite a good day with an empty one.
+
+    The partial glob spans every date, so a window with nothing left
+    matches no files and yields zero rows rather than failing.
+    """
+    from merger.handler import require_partials
+
+    with pytest.raises(RuntimeError, match='no partials remain'):
+        require_partials(coverage=(64, 0), service_date=date(2026, 9, 17))
+    require_partials(coverage=(64, 1), service_date=date(2026, 9, 17))
+
+
+def test_handler_rebuilds_collector_run_without_any_partials(
+    _bucket: str, _s3_endpoint: str,
+) -> None:
+    """Asking for collector_run alone works when the partials have gone.
+
+    This is what a backfill does. The table is folded from the
+    collector's JSONL, so it does not need a partial, and the guard
+    must not fire for it.
+    """
+    put_collector_rows(bucket=_bucket, stamps={
+        '2026-09-16': ['2026-09-16T23:00:00+00:00'],
+        '2026-09-17': ['2026-09-17T02:00:00+00:00'],
+    })
+    os.environ['BUCKET_NAME'] = _bucket
+    from merger.handler import handler
+
+    record = handler(
+        {'service_date': '2026-09-17', 'tables': ['collector_run']},
+        _Context(),
+        endpoint=_s3_endpoint,
+    )
+    assert record['rows_out'] == 2
+    written = boto3.client('s3').list_objects_v2(
+        Bucket=_bucket, Prefix='curated/',
+    )
+    keys = {item['Key'] for item in written['Contents']}
+    assert 'curated/fact_collector_run/service_date=2026-09-17/data.parquet' in keys
+    assert not any(key.startswith('curated/fact_trip_stop/') for key in keys)
 
 
 def test_partition_bounds_pad_the_merge_window() -> None:
@@ -119,9 +391,9 @@ def test_load_extensions_prefers_the_baked_httpfs(
     staging.execute('INSTALL httpfs;')
     staging.execute('INSTALL aws;')
     baked = next(tmp_path.glob('*/*/httpfs.duckdb_extension'))
-    monkeypatch.setattr('merger.handler.HTTPFS_EXTENSION', baked)
+    monkeypatch.setattr('merger.connection.HTTPFS_EXTENSION', baked)
     monkeypatch.setattr(
-        'merger.handler.AWS_EXTENSION',
+        'merger.connection.AWS_EXTENSION',
         next(tmp_path.glob('*/*/aws.duckdb_extension')),
     )
 
@@ -157,11 +429,11 @@ def test_baked_extensions_still_allow_the_s3_secret(
     staging.execute('INSTALL httpfs;')
     staging.execute('INSTALL aws;')
     monkeypatch.setattr(
-        'merger.handler.HTTPFS_EXTENSION',
+        'merger.connection.HTTPFS_EXTENSION',
         next(tmp_path.glob('*/*/httpfs.duckdb_extension')),
     )
     monkeypatch.setattr(
-        'merger.handler.AWS_EXTENSION',
+        'merger.connection.AWS_EXTENSION',
         next(tmp_path.glob('*/*/aws.duckdb_extension')),
     )
 

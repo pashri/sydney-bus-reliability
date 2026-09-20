@@ -11,7 +11,7 @@ Sydney observes daylight saving and the UTC offset changes mid-season.
 
 import os
 from datetime import UTC, date, datetime, timedelta
-from pathlib import Path
+from enum import StrEnum
 from typing import Any, Final, TypedDict
 
 import boto3
@@ -21,42 +21,65 @@ from aws_lambda_powertools.utilities.typing import LambdaContext
 
 from common.curation import CurationRepository
 from common.process import peak_rss_mb
-from common.service_day import merge_window, service_date_for
+from common.service_day import SYDNEY, merge_window, service_date_for
 from common.types_ import CurationJob, CurationRecord
+from merger.connection import configure
 from merger.merge_sql import POSITION_MERGE, build_trip_stop_query
 
 logger = Logger()
 
 PARTIAL_PREFIX: Final[str] = 'curated/_partial'
 
-HTTPFS_EXTENSION: Final[Path] = Path(
-    '/opt/python/duckdb_extensions/httpfs.duckdb_extension',
-)
-"""Where ``scripts/build_duckdb_layer.sh`` puts httpfs in the layer."""
 
-AWS_EXTENSION: Final[Path] = Path(
-    '/opt/python/duckdb_extensions/aws.duckdb_extension',
-)
-"""Where ``scripts/build_duckdb_layer.sh`` puts aws in the layer.
+class MergeTable(StrEnum):
+    """One of the tables a merge run can assemble."""
 
-``CREATE SECRET ... PROVIDER credential_chain`` lives in this
-extension, not in httpfs. Loading httpfs from the layer turns
-autoloading off, so aws has to be loaded explicitly or creating the
-secret fails and every merge dies before reading a row.
+    COLLECTOR_RUN = 'collector_run'
+    TRIP_STOP = 'trip_stop'
+    VEHICLE_POSITION = 'vehicle_position'
+
+
+FROM_PARTIALS: Final[frozenset[MergeTable]] = frozenset({
+    MergeTable.TRIP_STOP, MergeTable.VEHICLE_POSITION,
+})
+"""Tables assembled from the hourly partials.
+
+``collector_run`` is not one of them. It is folded from JSONL the
+collector writes, which is kept far longer than a partial, so it can be
+rebuilt for a day whose partials have already expired.
 """
 
-DUCKDB_THREADS: Final[int] = 2
-"""Worker threads.
 
-The function's memory allocation buys it about one vCPU, and DuckDB
-sizes its own pool from the machine it detects rather than from that.
-"""
+def selected_tables(*, event: dict[str, Any]) -> frozenset[MergeTable]:
+    """Choose which tables to assemble.
 
-DUCKDB_MEMORY_LIMIT: Final[str] = '2200MB'
-"""Headroom below the function's allocation, so DuckDB spills first."""
+    Parameters
+    ----------
+    event : dict[str, Any]
+        EventBridge event, optionally carrying a ``tables`` list.
 
-DUCKDB_TEMP_DIRECTORY: Final[str] = '/tmp'
-"""Where spilled data goes. The only writable path on Lambda."""
+    Returns
+    -------
+    frozenset[MergeTable]
+        Every table when unset, matching the scheduled run.
+
+    Raises
+    ------
+    ValueError
+        If a requested name is not a table this merger writes. Named
+        rather than ignored, so a typo in a hand-written payload does
+        not quietly assemble nothing.
+    """
+    names = event.get('tables')
+    if not names:
+        return frozenset(MergeTable)
+    try:
+        return frozenset(MergeTable(name) for name in names)
+    except ValueError as error:
+        known = ', '.join(sorted(MergeTable))
+        raise ValueError(
+            f'unknown table in {names!r}; expected any of {known}',
+        ) from error
 
 PARTITION_MARGIN: Final[timedelta] = timedelta(days=1)
 """Slack on each side of the ``dt`` bounds a merge window implies."""
@@ -123,154 +146,107 @@ def target_service_date(
     return service_date_for(instant=now) - timedelta(days=1)
 
 
-def configure(
+COLLECTOR_RUN_PREFIX: Final[str] = 'curated/collector_run/'
+
+COLLECTOR_RUN_COLUMNS: Final[str] = (
+    "{feed: 'VARCHAR', fetched_at_utc: 'VARCHAR',"
+    " received_at_utc: 'VARCHAR', rtt_s: 'DOUBLE',"
+    " server_date_utc: 'VARCHAR', skew_s: 'DOUBLE',"
+    " status_code: 'INTEGER', body_bytes: 'BIGINT', error: 'VARCHAR'}"
+)
+"""Every ``RunRecord`` field, typed for DuckDB's JSON reader.
+
+Declared rather than inferred. Inference reads the same column as a
+timestamp on one day and a string on the next, depending on whether any
+value carries fractional seconds and whether the whole column is null,
+which makes both the stored type and the day filter unstable.
+
+Timestamps are read as text and cast once, so a filter never depends on
+what the reader guessed.
+"""
+
+
+def source_day_globs(
     *,
-    connection: duckdb.DuckDBPyConnection,
-    endpoint: str | None = None,
-) -> None:
-    """Prepare a DuckDB connection for S3 access.
+    client: Any,
+    bucket: str,
+    service_date: date,
+) -> list[str]:
+    """List globs for the UTC days one Sydney service day can touch.
+
+    Only days with at least one object are returned. DuckDB raises on a
+    glob-list entry matching no files, which the earliest service date
+    would otherwise hit, having no preceding UTC partition.
+
+    Naming the two days beats globbing ``dt=*`` and filtering. Both read
+    the same rows, but the wildcard makes S3 list every day ever
+    collected first, so the merge would slow down for the life of the
+    project rather than staying flat.
 
     Parameters
     ----------
-    connection : duckdb.DuckDBPyConnection
-        Connection to configure.
-    endpoint : str | None
-        Override S3 endpoint, host[:port] only. A test seam, never
-        set in production. DuckDB's httpfs opens its own sockets, so
-        ``mock_aws()`` cannot intercept it and tests must point it at
-        a real local moto server instead.
-    """
-    load_extensions(connection=connection)
-    apply_limits(connection=connection)
-    create_s3_secret(connection=connection, endpoint=endpoint)
-
-
-def load_extensions(*, connection: duckdb.DuckDBPyConnection) -> None:
-    """Load the extensions the merge SQL needs.
-
-    ``httpfs`` backs every ``s3://`` read and write, and ``aws``
-    supplies the ``credential_chain`` secret provider. ``icu`` backs
-    ``AT TIME ZONE`` with a named zone, which resolves
-    ``scheduled_arrival_utc``; it is compiled into the DuckDB wheel and
-    loads without a download.
-
-    The layer ships both so that a run never depends on DuckDB's
-    extension repository being reachable. Off Lambda the layer is
-    absent and they are fetched from that repository instead.
-
-    Parameters
-    ----------
-    connection : duckdb.DuckDBPyConnection
-        Connection to load into.
-    """
-    if HTTPFS_EXTENSION.exists():
-        connection.execute('SET autoinstall_known_extensions = false')
-        connection.execute('SET autoload_known_extensions = false')
-        connection.execute(f"LOAD '{HTTPFS_EXTENSION}';")
-        connection.execute(f"LOAD '{AWS_EXTENSION}';")
-    else:
-        connection.execute('INSTALL httpfs; LOAD httpfs;')
-        connection.execute('INSTALL aws; LOAD aws;')
-    connection.execute('LOAD icu;')
-
-
-def apply_limits(*, connection: duckdb.DuckDBPyConnection) -> None:
-    """Bound DuckDB's threads and memory to the function's allocation.
-
-    DuckDB sizes both from the machine it detects, which in a container
-    can be the host rather than the slice the function was given. Left
-    alone it can run more workers than there is CPU for, and believe it
-    has memory it does not have, so it never spills before the runtime
-    kills the process.
-
-    Parameters
-    ----------
-    connection : duckdb.DuckDBPyConnection
-        Connection to bound.
-    """
-    connection.execute(f'SET threads = {DUCKDB_THREADS}')
-    connection.execute(f"SET memory_limit = '{DUCKDB_MEMORY_LIMIT}'")
-    connection.execute(
-        f"SET temp_directory = '{DUCKDB_TEMP_DIRECTORY}'",
-    )
-    logger.info(
-        'DuckDB limits applied',
-        extra=effective_limits(connection=connection),
-    )
-
-
-def effective_limits(
-    *,
-    connection: duckdb.DuckDBPyConnection,
-) -> dict[str, str]:
-    """Read back the limits DuckDB is actually running under.
-
-    Parameters
-    ----------
-    connection : duckdb.DuckDBPyConnection
-        Connection to interrogate.
+    client : Any
+        A boto3 S3 client.
+    bucket : str
+        Bucket holding the curated layer.
+    service_date : date
+        The Sydney service date being assembled.
 
     Returns
     -------
-    dict[str, str]
-        Each setting's name and its current value.
+    list[str]
+        One ``s3://`` glob per UTC day that exists.
     """
-    settings = ('threads', 'memory_limit', 'temp_directory')
-    return {
-        name: setting_value(connection=connection, name=name)
-        for name in settings
-    }
+    days = (service_date - timedelta(days=1), service_date)
+    prefixes = (
+        f'{COLLECTOR_RUN_PREFIX}dt={day:%Y-%m-%d}/' for day in days
+    )
+    return [
+        f's3://{bucket}/{prefix}*.jsonl'
+        for prefix in prefixes
+        if client.list_objects_v2(
+            Bucket=bucket, Prefix=prefix, MaxKeys=1,
+        ).get('KeyCount')
+    ]
 
 
-def setting_value(
-    *,
-    connection: duckdb.DuckDBPyConnection,
-    name: str,
-) -> str:
-    """Read one DuckDB setting's current value.
+def collector_run_query(*, globs: list[str]) -> str:
+    """Build the query cutting one Sydney day out of the audit JSONL.
 
     Parameters
     ----------
-    connection : duckdb.DuckDBPyConnection
-        Connection to interrogate.
-    name : str
-        Setting to read.
+    globs : list[str]
+        One ``s3://`` glob per UTC day to read.
 
     Returns
     -------
     str
-        The setting's value, or an empty string if it has none.
+        A query selecting one Sydney day's rows, with each timestamp
+        parsed to an instant.
     """
-    result = connection.execute(
-        f"SELECT current_setting('{name}')",
-    ).fetchone()
-    return str(result[0]) if result else ''
-
-
-def create_s3_secret(
-    *,
-    connection: duckdb.DuckDBPyConnection,
-    endpoint: str | None = None,
-) -> None:
-    """Give a connection credentials for S3.
-
-    Parameters
-    ----------
-    connection : duckdb.DuckDBPyConnection
-        Connection to configure.
-    endpoint : str | None
-        Override S3 endpoint, host[:port] only.
+    source = ', '.join(f"'{glob}'" for glob in globs)
+    return f"""
+    SELECT
+        feed,
+        CAST(fetched_at_utc AS TIMESTAMPTZ) AS fetched_at_utc,
+        CAST(received_at_utc AS TIMESTAMPTZ) AS received_at_utc,
+        rtt_s,
+        CAST(server_date_utc AS TIMESTAMPTZ) AS server_date_utc,
+        skew_s,
+        status_code,
+        body_bytes,
+        error
+    FROM read_json(
+        [{source}],
+        columns = {COLLECTOR_RUN_COLUMNS}
+    )
+    WHERE CAST(fetched_at_utc AS TIMESTAMPTZ) >= (
+          CAST($day AS TIMESTAMP) AT TIME ZONE '{SYDNEY.key}'
+      )
+      AND CAST(fetched_at_utc AS TIMESTAMPTZ) < (
+          CAST($day AS TIMESTAMP) + INTERVAL 1 DAY
+      ) AT TIME ZONE '{SYDNEY.key}'
     """
-    # CHAIN 'env' pins credential resolution to environment variables,
-    # which is what both the Lambda runtime and the test fixtures set,
-    # rather than DuckDB's default order which checks a local
-    # ~/.aws/credentials profile first and can pick up stale keys.
-    options = "PROVIDER credential_chain, CHAIN 'env'"
-    if endpoint:
-        options += (
-            f", ENDPOINT '{endpoint}', URL_STYLE 'path', USE_SSL false"
-        )
-    connection.execute(f'CREATE SECRET (TYPE s3, {options});')
 
 
 def merge_collector_run(
@@ -278,13 +254,20 @@ def merge_collector_run(
     bucket: str,
     service_date: date,
     endpoint: str | None = None,
+    session: boto3.Session | None = None,
 ) -> int:
-    """Fold one day of collector JSONL into a Parquet table.
+    """Fold one Sydney day of collector JSONL into a Parquet table.
 
     Written to ``fact_collector_run``, a separate prefix. The source
     JSONL under ``collector_run`` is left in place, because the
     collector keeps appending to it and ``check_collection.py`` reads
     it directly.
+
+    The source is partitioned by UTC fetch date and the output by
+    Sydney service date, so one output day is cut from the two source
+    partitions it spans. The cut is made with a named timezone rather
+    than a fixed offset, because a Sydney day is 23 or 25 hours long
+    across a daylight-saving transition.
 
     Parameters
     ----------
@@ -294,52 +277,37 @@ def merge_collector_run(
         Sydney date whose audit records to fold.
     endpoint : str | None
         Test-only S3 endpoint override, forwarded to ``configure``.
+    session : boto3.Session | None
+        Optional boto3 session, used to find which UTC days exist.
+        Defaults to a new session.
 
     Returns
     -------
     int
-        Rows written.
+        Rows written, or zero when neither source day exists.
     """
+    client = (session or boto3.Session()).client('s3')
+    globs = source_day_globs(
+        client=client, bucket=bucket, service_date=service_date,
+    )
+    if not globs:
+        logger.warning(
+            'No collector audit records for this service day',
+            extra={'service_date': f'{service_date:%Y-%m-%d}'},
+        )
+        return 0
     connection = duckdb.connect()
     configure(connection=connection, endpoint=endpoint)
-    source = (
-        f's3://{bucket}/curated/collector_run/'
-        f'dt={service_date:%Y-%m-%d}/*.jsonl'
-    )
     target = (
         f's3://{bucket}/curated/fact_collector_run/'
         f'service_date={service_date:%Y-%m-%d}/data.parquet'
     )
     connection.execute(
-        f"COPY (SELECT * FROM read_json_auto('{source}')) "
+        f'COPY ({collector_run_query(globs=globs)}) '
         f"TO '{target}' (FORMAT PARQUET, COMPRESSION SNAPPY)",
+        {'day': f'{service_date:%Y-%m-%d}'},
     )
-    return count_rows(connection=connection, source=source)
-
-
-def count_rows(
-    *,
-    connection: duckdb.DuckDBPyConnection,
-    source: str,
-) -> int:
-    """Count rows in a JSON source.
-
-    Parameters
-    ----------
-    connection : duckdb.DuckDBPyConnection
-        Open connection.
-    source : str
-        Path or glob to read.
-
-    Returns
-    -------
-    int
-        Row count.
-    """
-    result = connection.execute(
-        f"SELECT COUNT(*) FROM read_json_auto('{source}')",
-    ).fetchone()
-    return int(result[0]) if result else 0
+    return count_parquet_rows(connection=connection, target=target)
 
 
 def partial_glob(*, bucket: str, table: str) -> str:
@@ -798,6 +766,38 @@ def build_record(
     }
 
 
+def require_partials(
+    *,
+    coverage: tuple[int, int],
+    service_date: date,
+) -> None:
+    """Refuse to assemble a day whose partials have all gone.
+
+    A merge reads the partials through a glob spanning every date, so an
+    expired window matches no files rather than failing, and the day
+    would be rewritten as an empty table over a good one. Partials are
+    kept for days and facts forever, so a re-run long after the fact is
+    the expected way to hit this.
+
+    Parameters
+    ----------
+    coverage : tuple[int, int]
+        ``objects_expected`` and ``objects_read``, from
+        ``count_partial_coverage``.
+    service_date : date
+        The Sydney service date being assembled.
+
+    Raises
+    ------
+    RuntimeError
+        If no partial covering the window still exists.
+    """
+    if not coverage[1]:
+        raise RuntimeError(
+            f'no partials remain for service day {service_date:%Y-%m-%d}',
+        )
+
+
 def warn_on_short_day(*, coverage: tuple[int, int]) -> None:
     """Log a warning when fewer partials exist than the window implies.
 
@@ -834,7 +834,9 @@ def handler(
     ----------
     event : dict[str, Any]
         EventBridge event, optionally carrying a ``service_date``
-        override.
+        override and a ``tables`` list naming which tables to
+        assemble. Both are for re-runs; the scheduled event carries
+        neither and assembles all three for yesterday.
     context : LambdaContext
         Lambda context, used for the invocation id.
     endpoint : str | None
@@ -846,29 +848,44 @@ def handler(
     -------
     CurationRecord
         The audit record written for this run.
+
+    Raises
+    ------
+    RuntimeError
+        If a table built from partials was asked for and none remain.
     """
     bucket = os.environ['BUCKET_NAME']
     started = datetime.now(tz=UTC)
     service_date = target_service_date(event=event, now=started)
+    tables = selected_tables(event=event)
     window = merge_window(service_date=service_date)
     session = boto3.Session()
-    connection = duckdb.connect()
-    configure(connection=connection, endpoint=endpoint)
-    collector_rows = merge_collector_run(
-        bucket=bucket, service_date=service_date, endpoint=endpoint,
-    )
-    trip_rows = merge_trip_stops(
-        connection=connection, bucket=bucket, service_date=service_date,
-        window=window, session=session,
-    )
-    position_rows = merge_positions(
-        connection=connection, bucket=bucket,
-        service_date=service_date, window=window,
-    )
     coverage = count_partial_coverage(
         bucket=bucket, window=window, session=session,
     )
-    warn_on_short_day(coverage=coverage)
+    if tables & FROM_PARTIALS:
+        require_partials(coverage=coverage, service_date=service_date)
+        warn_on_short_day(coverage=coverage)
+    connection = duckdb.connect()
+    configure(connection=connection, endpoint=endpoint)
+    collector_rows = 0
+    if MergeTable.COLLECTOR_RUN in tables:
+        collector_rows = merge_collector_run(
+            bucket=bucket, service_date=service_date, endpoint=endpoint,
+            session=session,
+        )
+    trip_rows = 0
+    if MergeTable.TRIP_STOP in tables:
+        trip_rows = merge_trip_stops(
+            connection=connection, bucket=bucket,
+            service_date=service_date, window=window, session=session,
+        )
+    position_rows = 0
+    if MergeTable.VEHICLE_POSITION in tables:
+        position_rows = merge_positions(
+            connection=connection, bucket=bucket,
+            service_date=service_date, window=window,
+        )
     record = build_record(
         context=context, started=started, service_date=service_date,
         rows_written=(collector_rows, trip_rows, position_rows),

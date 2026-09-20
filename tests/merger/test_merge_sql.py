@@ -300,7 +300,7 @@ def test_lost_tracking_reflects_the_final_dropout(
     columns = [d[0] for d in _connection.description]
     merged = dict(zip(columns, result[0]))
     assert merged['lost_tracking']
-    assert not merged['is_reliable']
+    assert merged['is_reliable'] is False
 
 
 def test_never_reported_key_is_not_lost_tracking(
@@ -378,7 +378,7 @@ def test_a_later_real_hour_clears_an_earlier_dropout(
     columns = [d[0] for d in _connection.description]
     merged = dict(zip(columns, result[0]))
     assert not merged['lost_tracking']
-    assert merged['is_reliable']
+    assert merged['is_reliable'] is True
 
 
 def test_loop_route_stop_sequence_keeps_both_calls(
@@ -438,7 +438,7 @@ def test_null_delay_is_not_reliable(
     ).fetchall()
     columns = [d[0] for d in _connection.description]
     merged = dict(zip(columns, result[0]))
-    assert not merged['is_reliable']
+    assert merged['is_reliable'] is False
 
 
 def test_stale_prediction_beyond_lead_is_not_reliable(
@@ -460,7 +460,108 @@ def test_stale_prediction_beyond_lead_is_not_reliable(
     ).fetchall()
     columns = [d[0] for d in _connection.description]
     merged = dict(zip(columns, result[0]))
-    assert not merged['is_reliable']
+    assert merged['is_reliable'] is False
+
+
+def test_delay_without_predicted_arrival_is_not_reliable(
+    _connection: duckdb.DuckDBPyConnection,
+    tmp_path: Path,
+) -> None:
+    """A delay with no arrival time to compare it against reads False.
+
+    The feed can send a stop-time event carrying ``delay`` and no
+    ``time``. Comparing the last update against a missing arrival
+    yields NULL, so the flag is coalesced rather than left unknown.
+    """
+    row = trip_row(
+        hour=20,
+        n_updates=1,
+        delay=60,
+        last_update=datetime(2026, 9, 16, 20, 30, tzinfo=UTC),
+    )
+    row['final_predicted_arrival_utc'] = None
+    glob = write_partials(
+        tmp_path=tmp_path, rows=[row], schema=TRIP_STOP_SCHEMA,
+    )
+    result = _connection.execute(
+        TRIP_STOP_MERGE, merge_params(glob=glob),
+    ).fetchall()
+    columns = [d[0] for d in _connection.description]
+    merged = dict(zip(columns, result[0]))
+    assert merged['delay_s'] == 60
+    assert merged['final_predicted_arrival_utc'] is None
+    assert merged['is_reliable'] is False
+
+
+def test_merged_counter_and_flag_survive_a_parquet_round_trip(
+    _connection: duckdb.DuckDBPyConnection,
+    tmp_path: Path,
+) -> None:
+    """``n_updates`` stays a whole number and ``is_reliable`` a boolean.
+
+    Asserted on the written file rather than on the query result.
+    ``SUM`` widens the counter to a type Parquet cannot hold, so the
+    narrowing is only observable once the file is read back.
+    """
+    rows = [
+        trip_row(hour=20, n_updates=3, delay=60,
+                 last_update=datetime(2026, 9, 16, 20, 30, tzinfo=UTC)),
+        trip_row(hour=21, n_updates=4, delay=60,
+                 last_update=datetime(2026, 9, 16, 21, 30, tzinfo=UTC)),
+    ]
+    glob = write_partials(
+        tmp_path=tmp_path, rows=rows, schema=TRIP_STOP_SCHEMA,
+    )
+    target = tmp_path / 'fact_trip_stop.parquet'
+    _connection.execute(
+        f"COPY ({TRIP_STOP_MERGE}) TO '{target}' (FORMAT PARQUET)",
+        merge_params(glob=glob),
+    )
+    schema = pq.read_schema(target)
+    assert schema.field('n_updates').type == pa.int32()
+    assert schema.field('is_reliable').type == pa.bool_()
+    assert schema.field('service_date').type == pa.string()
+
+
+def test_merged_columns_keep_the_partial_types(
+    _connection: duckdb.DuckDBPyConnection,
+    tmp_path: Path,
+) -> None:
+    """Every column the merge carries through keeps its stored type.
+
+    Read back from the written file, not from the query, and compared
+    against the partial's own schema. A tool that reads a fact object
+    by its full path picks up ``service_date`` from the
+    ``service_date=`` path segment unless it opts out, and writing that
+    back changes the column's type without changing a row count.
+    """
+    row = trip_row(
+        hour=20,
+        n_updates=1,
+        delay=60,
+        last_update=datetime(2026, 9, 16, 20, 30, tzinfo=UTC),
+    )
+    glob = write_partials(
+        tmp_path=tmp_path, rows=[row], schema=TRIP_STOP_SCHEMA,
+    )
+    target = tmp_path / 'fact.parquet'
+    _connection.execute(
+        f"COPY ({TRIP_STOP_MERGE}) TO '{target}' (FORMAT PARQUET)",
+        merge_params(glob=glob),
+    )
+    written = pq.read_schema(target)
+    carried = [
+        field for field in TRIP_STOP_SCHEMA
+        if field.name in written.names
+        and field.name != 'last_observed_at_utc'
+    ]
+    assert carried
+    for field in carried:
+        stored = written.field(field.name).type
+        if pa.types.is_timestamp(field.type):
+            assert pa.types.is_timestamp(stored), field.name
+        else:
+            assert stored == field.type, field.name
 
 
 def test_hive_partition_columns_are_not_merged_in(
