@@ -3,14 +3,14 @@
 from datetime import UTC, datetime
 from http import HTTPStatus
 
+from collector.handler import _crash_outcome
+from common.types_ import CRASHED_POLL_ERROR, Feed, RunRecord
 from scripts.check_collection import (
     CollectionRunRepository,
     _failure_category,
     summarize_day,
     summarize_memory,
 )
-from collector.handler import _crash_outcome
-from common.types_ import CRASHED_POLL_ERROR, Feed, RunRecord
 
 DATE = '2026-09-15'
 

@@ -4,11 +4,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from common.clock import (
-    parse_server_date,
-    round_trip_seconds,
-    skew_seconds,
-)
+from common.clock import parse_server_date, round_trip_seconds, skew_seconds
 
 
 def test_parse_server_date_returns_utc() -> None:
