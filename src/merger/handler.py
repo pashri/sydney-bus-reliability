@@ -34,6 +34,17 @@ HTTPFS_EXTENSION: Final[Path] = Path(
 )
 """Where ``scripts/build_duckdb_layer.sh`` puts httpfs in the layer."""
 
+AWS_EXTENSION: Final[Path] = Path(
+    '/opt/python/duckdb_extensions/aws.duckdb_extension',
+)
+"""Where ``scripts/build_duckdb_layer.sh`` puts aws in the layer.
+
+``CREATE SECRET ... PROVIDER credential_chain`` lives in this
+extension, not in httpfs. Loading httpfs from the layer turns
+autoloading off, so aws has to be loaded explicitly or creating the
+secret fails and every merge dies before reading a row.
+"""
+
 DUCKDB_THREADS: Final[int] = 2
 """Worker threads.
 
@@ -137,14 +148,15 @@ def configure(
 def load_extensions(*, connection: duckdb.DuckDBPyConnection) -> None:
     """Load the extensions the merge SQL needs.
 
-    ``httpfs`` backs every ``s3://`` read and write. ``icu`` backs
+    ``httpfs`` backs every ``s3://`` read and write, and ``aws``
+    supplies the ``credential_chain`` secret provider. ``icu`` backs
     ``AT TIME ZONE`` with a named zone, which resolves
     ``scheduled_arrival_utc``; it is compiled into the DuckDB wheel and
     loads without a download.
 
-    The layer ships httpfs so that a run never depends on DuckDB's
+    The layer ships both so that a run never depends on DuckDB's
     extension repository being reachable. Off Lambda the layer is
-    absent, and httpfs is fetched from that repository instead.
+    absent and they are fetched from that repository instead.
 
     Parameters
     ----------
@@ -155,8 +167,10 @@ def load_extensions(*, connection: duckdb.DuckDBPyConnection) -> None:
         connection.execute('SET autoinstall_known_extensions = false')
         connection.execute('SET autoload_known_extensions = false')
         connection.execute(f"LOAD '{HTTPFS_EXTENSION}';")
+        connection.execute(f"LOAD '{AWS_EXTENSION}';")
     else:
         connection.execute('INSTALL httpfs; LOAD httpfs;')
+        connection.execute('INSTALL aws; LOAD aws;')
     connection.execute('LOAD icu;')
 
 

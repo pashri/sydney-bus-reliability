@@ -25,7 +25,12 @@ rm -rf "$OUT/.wheels"
 # version or platform mismatch fails the deploy instead.
 EXTENSIONS="$OUT/python/duckdb_extensions"
 mkdir -p "$EXTENSIONS"
-curl -fsSL \
-  "http://extensions.duckdb.org/v${VERSION}/linux_arm64/httpfs.duckdb_extension.gz" \
-  | gunzip > "$EXTENSIONS/httpfs.duckdb_extension"
+# aws as well as httpfs: loading httpfs from the layer turns
+# autoloading off, and CREATE SECRET ... PROVIDER credential_chain
+# lives in aws, so without it every merge fails before reading a row.
+for ext in httpfs aws; do
+  curl -fsSL \
+    "http://extensions.duckdb.org/v${VERSION}/linux_arm64/${ext}.duckdb_extension.gz" \
+    | gunzip > "$EXTENSIONS/${ext}.duckdb_extension"
+done
 du -sh "$OUT/python"

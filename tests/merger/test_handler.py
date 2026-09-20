@@ -18,6 +18,7 @@ from compactor.trip_updates import TRIP_STOP_SCHEMA
 from merger.handler import (
     configure,
     handler,
+    create_s3_secret,
     load_extensions,
     merge_trip_stops,
     partial_hour_from_key,
@@ -116,8 +117,13 @@ def test_load_extensions_prefers_the_baked_httpfs(
         config={'extension_directory': str(tmp_path)},
     )
     staging.execute('INSTALL httpfs;')
+    staging.execute('INSTALL aws;')
     baked = next(tmp_path.glob('*/*/httpfs.duckdb_extension'))
     monkeypatch.setattr('merger.handler.HTTPFS_EXTENSION', baked)
+    monkeypatch.setattr(
+        'merger.handler.AWS_EXTENSION',
+        next(tmp_path.glob('*/*/aws.duckdb_extension')),
+    )
 
     connection = duckdb.connect()
     load_extensions(connection=connection)
@@ -131,6 +137,42 @@ def test_load_extensions_prefers_the_baked_httpfs(
     ).fetchone()
     assert loaded == (True,)
     assert autoinstall == (False,)
+
+
+def test_baked_extensions_still_allow_the_s3_secret(
+    _credentials: None,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Creating the S3 secret survives autoloading being turned off.
+
+    Loading httpfs from the layer disables autoloading, and the
+    ``credential_chain`` provider lives in the separate ``aws``
+    extension. Without that loaded too, every merge fails at
+    ``CREATE SECRET`` before reading a row.
+    """
+    staging = duckdb.connect(
+        config={'extension_directory': str(tmp_path)},
+    )
+    staging.execute('INSTALL httpfs;')
+    staging.execute('INSTALL aws;')
+    monkeypatch.setattr(
+        'merger.handler.HTTPFS_EXTENSION',
+        next(tmp_path.glob('*/*/httpfs.duckdb_extension')),
+    )
+    monkeypatch.setattr(
+        'merger.handler.AWS_EXTENSION',
+        next(tmp_path.glob('*/*/aws.duckdb_extension')),
+    )
+
+    connection = duckdb.connect()
+    load_extensions(connection=connection)
+    create_s3_secret(connection=connection, endpoint=None)
+
+    secrets = connection.execute(
+        "SELECT count(*) FROM duckdb_secrets() WHERE type = 's3'",
+    ).fetchone()
+    assert secrets == (1,)
 
 
 def test_configure_resolves_a_named_timezone(
