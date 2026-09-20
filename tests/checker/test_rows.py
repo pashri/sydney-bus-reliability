@@ -1,6 +1,7 @@
 """Tests for the checker's two sources of collector audit rows."""
 
 import json
+import sys
 from datetime import date
 
 import boto3
@@ -125,3 +126,55 @@ def test_merged_and_live_paths_agree(
     assert merged.source is RowSource.MERGED
     assert merged.rows == live.rows
     assert summarize_day(merged.rows) == summarize_day(live.rows)
+
+
+@pytest.fixture(name='no_pytz')
+def _no_pytz(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make ``import pytz`` fail, as it does on Lambda.
+
+    Local dev has pytz installed as a dev dependency, so a test run on
+    a laptop cannot otherwise tell whether a query would work in
+    production. DuckDB imports it only when a TIMESTAMPTZ column is
+    fetched into Python, which no static import check can see.
+    """
+    monkeypatch.setitem(sys.modules, 'pytz', None)
+
+
+def test_fetching_a_timestamptz_needs_pytz(no_pytz: None) -> None:
+    """Guards the guard: without this, the fixture could go stale and
+    the tests below would pass for the wrong reason."""
+    connection = duckdb.connect()
+    with pytest.raises(duckdb.InvalidInputException, match='pytz'):
+        connection.execute(
+            "SELECT CAST('2026-09-17T03:30:00+00:00' AS TIMESTAMPTZ)",
+        ).fetchall()
+
+
+def test_live_path_reads_without_pytz(
+    _bucket: str,
+    _s3_endpoint: str,
+    stamps: dict[str, list[str]],
+    no_pytz: None,
+) -> None:
+    _put_rows(bucket=_bucket, stamps=stamps)
+    fetched = _repository(
+        bucket=_bucket, endpoint=_s3_endpoint,
+    ).fetch_day(day=DAY)
+    assert len(fetched.rows) == 4
+
+
+def test_merged_path_reads_without_pytz(
+    _bucket: str,
+    _s3_endpoint: str,
+    stamps: dict[str, list[str]],
+    no_pytz: None,
+) -> None:
+    _put_rows(bucket=_bucket, stamps=stamps)
+    merge_collector_run(
+        bucket=_bucket, service_date=DAY, endpoint=_s3_endpoint,
+    )
+    fetched = _repository(
+        bucket=_bucket, endpoint=_s3_endpoint,
+    ).fetch_day(day=DAY)
+    assert fetched.source is RowSource.MERGED
+    assert len(fetched.rows) == 4

@@ -17,6 +17,36 @@ logger = Logger()
 FACT_PREFIX: Final[str] = 'curated/fact_collector_run/'
 
 
+def as_text(*, query: str) -> str:
+    """Re-project a query so its timestamps come back as text.
+
+    The shared query types its timestamps for the merger, which writes
+    them to Parquet and never reads them into Python. Fetching one
+    here instead would make DuckDB import ``pytz``, which no function
+    packages.
+
+    Parameters
+    ----------
+    query : str
+        A query selecting audit-row columns in order.
+
+    Returns
+    -------
+    str
+        The same rows, with every timestamp rendered as text.
+    """
+    return f"""
+    SELECT
+        feed,
+        CAST(fetched_at_utc AS VARCHAR) AS fetched_at_utc,
+        CAST(received_at_utc AS VARCHAR) AS received_at_utc,
+        rtt_s,
+        CAST(server_date_utc AS VARCHAR) AS server_date_utc,
+        skew_s, status_code, body_bytes, error
+    FROM ({query})
+    """
+
+
 class RowSource(StrEnum):
     """Which store a day's rows were read from."""
 
@@ -41,24 +71,29 @@ class DayRows:
     source: RowSource
 
 
-def to_utc_iso(value: datetime | None) -> str | None:
-    """Render a timestamp as a UTC ISO 8601 string.
+def to_utc_iso(value: str | None) -> str | None:
+    """Normalise a rendered timestamp to a UTC ISO 8601 string.
 
-    DuckDB returns a ``TIMESTAMPTZ`` in its session time zone, which
-    is the container's rather than UTC. Converting before formatting
-    keeps the rendered offset the same as the one the collector wrote.
+    Timestamps arrive as text, never as a ``TIMESTAMPTZ``: fetching
+    one of those into Python makes DuckDB import ``pytz``, which is a
+    development dependency and is not packaged into any function.
+    DuckDB renders with a space separator and a two-digit offset, and
+    the collector writes a different spelling of the same instant, so
+    both are parsed and rendered again to one form.
 
     Parameters
     ----------
-    value : datetime | None
-        Timestamp to render.
+    value : str | None
+        Timestamp as rendered by DuckDB or written by the collector.
 
     Returns
     -------
     str | None
         The timestamp in UTC, or None if `value` is None.
     """
-    return value.astimezone(UTC).isoformat() if value else None
+    if not value:
+        return None
+    return datetime.fromisoformat(value).astimezone(UTC).isoformat()
 
 
 def run_record(row: tuple[Any, ...]) -> RunRecord:
@@ -110,8 +145,12 @@ def fact_day_query(*, bucket: str, day: date) -> str:
     )
     return f"""
     SELECT
-        feed, fetched_at_utc, received_at_utc, rtt_s,
-        server_date_utc, skew_s, status_code, body_bytes, error
+        feed,
+        CAST(fetched_at_utc AS VARCHAR) AS fetched_at_utc,
+        CAST(received_at_utc AS VARCHAR) AS received_at_utc,
+        rtt_s,
+        CAST(server_date_utc AS VARCHAR) AS server_date_utc,
+        skew_s, status_code, body_bytes, error
     FROM read_parquet('{target}')
     ORDER BY fetched_at_utc, feed
     """
@@ -213,7 +252,7 @@ class CollectorRunRepository:  # pylint: disable=too-few-public-methods
             )
             return []
         return self._rows(
-            query=collector_run_query(globs=globs),
+            query=as_text(query=collector_run_query(globs=globs)),
             parameters={'day': f'{day:%Y-%m-%d}'},
         )
 
