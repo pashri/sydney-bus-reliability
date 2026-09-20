@@ -457,7 +457,12 @@ Resources:
         DailyAfterLastTrips:
           Type: ScheduleV2
           Properties:
-            ScheduleExpression: cron(0 4 * * ? *)
+            # 08:00, not 04:00. The merge window runs to 07:00 local,
+            # because a trip can belong to this service day and still
+            # be running at GTFS hour 30. A 04:00 run cannot see the
+            # last hours of the day it is assembling, and reported a
+            # short day every night without anything being wrong.
+            ScheduleExpression: cron(0 8 * * ? *)
             ScheduleExpressionTimezone: Australia/Sydney
 
   MergerSilentAlarm:
@@ -495,7 +500,11 @@ Resources:
         - Name: FunctionName
           Value: !Ref MergerFunction
       Statistic: Sum
-      Period: 86400
+      # An hour, matching the schedule loader, which is also a
+      # once-a-day job. A day-long window kept the alarm red for
+      # twenty-four hours after a single error, including a failed
+      # manual re-run, and hid any new error while it was red.
+      Period: 3600
       EvaluationPeriods: 1
       Threshold: 1
       ComparisonOperator: GreaterThanOrEqualToThreshold

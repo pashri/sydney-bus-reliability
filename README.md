@@ -29,10 +29,11 @@ AWS SAM: four Lambdas, two layers and one S3 bucket.
   keyed by actual fetch time
 - `compactor`, hourly at 10 past. Decodes one UTC hour of `raw/` into two
   Parquet partials under `curated/_partial/`
-- `merger`, 04:00 Australia/Sydney. Folds a whole service day of partials
+- `merger`, 08:00 Australia/Sydney. Folds a whole service day of partials
   into `fact_trip_stop`, `fact_vehicle_position` and `fact_collector_run`.
-  It runs at 04:00 rather than midnight because a trip can belong to one
-  service day while running as late as 06:00 the next morning
+  Not midnight, and not 04:00 either: a trip can belong to one service day
+  while running as late as 06:00 the next morning, so the window it reads
+  closes at 07:00 and it has to run after that
 - `schedule_loader`, 12:00 Australia/Sydney. Fetches the static GTFS bundle
   and writes a new `valid_from` snapshot of the seven dimensions only when
   the bundle's content hash changes, since the bundle is forward-looking

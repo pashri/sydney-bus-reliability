@@ -1,9 +1,10 @@
 """Daily assembly of hourly partials into service-day facts.
 
-Runs at about 04:00 Sydney, not midnight. A trip can belong to one
-service day while running past midnight, as late as hour 30, i.e.
-06:00 the next calendar day. Merging at midnight would finalise a
-service date before its last trips had finished reporting.
+Runs at 08:00 Sydney, not midnight. A trip can belong to one service
+day while running past midnight, as late as hour 30, i.e. 06:00 the
+next calendar day, and the window this reads runs to 07:00 to cover
+it. Merging earlier finalises a service date before the hours it
+claims to read have happened.
 
 The window of partials to read is computed timezone-aware, since
 Sydney observes daylight saving and the UTC offset changes mid-season.
