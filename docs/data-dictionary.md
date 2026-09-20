@@ -127,9 +127,10 @@ The derived tables are [Parquet](https://parquet.apache.org/docs/) files, a
 columnar binary format. Every column has a declared type, so the types in
 this document are what is actually stored, not a convention.
 
-They are compressed with zstd, and the fact tables are written in sorted
-order: trip stops by route, trip and stop; vehicle positions by route and
-time. Parquet records the smallest and largest value of every column in each
+The fact tables are compressed with zstd and written in sorted order: trip
+stops by route, trip and stop; vehicle positions by route and time. The
+hourly intermediates and the dimensions use snappy instead, because the
+pyarrow that writes them cannot produce zstd. Parquet records the smallest and largest value of every column in each
 block of rows, so a query filtered to one route can skip most of a day's
 blocks without reading them.
 

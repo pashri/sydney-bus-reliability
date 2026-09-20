@@ -9,7 +9,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from common.parquet import ParquetRepository
+from common.parquet import COMPRESSION, ParquetRepository
 
 SCHEMA: pa.Schema = pa.schema([
     pa.field('vehicle_id', pa.string()),
@@ -175,3 +175,17 @@ def test_put_batches_writes_nothing_when_a_batch_fails(
         Bucket=_bucket, Prefix='curated/x/bad.parquet',
     )
     assert listing['KeyCount'] == 0
+
+
+def test_compression_is_one_the_lambda_layer_can_write() -> None:
+    """These objects must use a codec the deployed pyarrow has.
+
+    A tripwire, not a real check. The pyarrow in the AWS
+    SDK-for-pandas layer is built without zstd, and a local pyarrow
+    has it, so nothing in this suite can tell the difference. The
+    failure is at the first write in production, not at import.
+
+    Changing this constant means proving the layer's build supports
+    the new codec first.
+    """
+    assert COMPRESSION == 'snappy'

@@ -15,7 +15,17 @@ from aws_lambda_powertools import Logger
 
 logger = Logger()
 
-COMPRESSION: Final[Literal['zstd']] = 'zstd'
+COMPRESSION: Final[Literal['snappy']] = 'snappy'
+"""Not zstd, however much smaller it would be.
+
+These objects are written by the pyarrow in the AWS SDK-for-pandas
+layer, which is built without the zstd codec, and asking for one it
+does not have fails at the first write rather than at import. A local
+pyarrow does have it, so no test catches this.
+
+The merger writes its Parquet through DuckDB instead, and does use
+zstd.
+"""
 CONTENT_TYPE: Final[str] = 'application/vnd.apache.parquet'
 
 
