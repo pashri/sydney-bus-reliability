@@ -37,33 +37,32 @@ AWS SAM: four Lambdas, two layers and one S3 bucket.
   and writes a new `valid_from` snapshot of the seven dimensions only when
   the bundle's content hash changes, since the bundle is forward-looking
   and a missed day's timetable cannot be recovered later
-- Two layers: DuckDB for the merger, built locally by `make layer`, and
-  the AWS-managed SDK-for-pandas layer supplying pyarrow, pinned by
-  version
+- Two layers: DuckDB for the merger, built by `sam build` through
+  `layers/duckdb/Makefile`, and the AWS-managed SDK-for-pandas layer
+  supplying pyarrow, pinned by version
 - Lifecycle: `raw/` expires after 30 days, `curated/_partial/` after 3.
   Everything else is kept
 - Python 3.14, managed with uv
 
 ## Deploy
 
-    make install
+    uv sync
     aws ssm put-parameter \
       --name /sydney-bus-reliability/tfnsw-api-key \
       --value '<key>' --type SecureString --region ap-southeast-2
-    AWS_PROFILE=<profile> make deploy ALERT_EMAIL=<address>
+    AWS_PROFILE=<profile> ALERT_EMAIL=<address> ./deploy.sh
 
 `ALERT_EMAIL` is only needed the first time, when the stack has no stored
-value for it. After that, `make deploy`.
+value for it. After that, `AWS_PROFILE=<profile> ./deploy.sh`. Pass
+`--no-deploy` to validate and build without deploying.
 
-`make deploy` builds the DuckDB layer first, but only when it is missing or
-when `uv.lock` has moved, since the layer is pinned to the DuckDB version
-uv resolved. The layer is a build artefact and is not in the repository, so
-a fresh clone always builds it once. `make` on its own lists every target.
+`sam build` builds the DuckDB layer itself, through `layers/duckdb/Makefile`,
+because the layer declares `BuildMethod: makefile`. There is no separate
+layer step, and nothing to build by hand on a fresh clone.
 
 ## Test
 
-    make test     # pytest
-    make check    # pytest, every linter, and sam validate
+    uv run pytest
 
 ## Re-running a merge
 
