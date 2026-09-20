@@ -180,10 +180,16 @@ where this project has measured the feed and found something different, the
 entry says so and names both. Where there is no measurement, the guide
 stands unopposed.
 
-**Unrecognised codes.** The coded fields - `schedule_relationship`,
-`occupancy_status`, `current_status`, `congestion_level` - read as null if
-Transport for NSW ever sends a value outside the published list. The
-original value is not preserved anywhere. See
+**Unrecognised codes.** Most coded fields - `occupancy_status`,
+`current_status`, `congestion_level`, `trip_schedule_relationship`, and
+`vehicle_position`'s `schedule_relationship` - read as null if Transport
+for NSW ever sends a value outside the published list. The original value
+is not preserved anywhere.
+
+`trip_stop`'s own `schedule_relationship` is the exception. It is read
+without first asking whether the field was sent, so a value outside the
+list, or no value at all, reads as `SCHEDULED` - the format's default -
+and cannot be told apart from a genuine `SCHEDULED`. See
 [methodology 12](methodology.md#12-codes-we-dont-recognise-arrive-as-missing).
 
 ---
@@ -217,11 +223,16 @@ same date, deliberately, so it does not matter which one a reader gets. Where
 they ever diverge the folder wins, and anything that reads a file by its full
 path and writes it back would persist the folder's value over the column's.
 `dt` and `hour` under `raw/` and `_partial/` are **UTC**. `service_date=`
-and `valid_from=` are **Sydney dates**.
+and `collection_date=` are **Sydney dates**. `valid_from=` is a **UTC
+date**, taken from the instant of the check: the scheduled noon-Sydney run
+lands on the same date either way, but a run before 10:00 Sydney - 11:00
+while daylight saving is in effect - files under the previous UTC date.
 
 Three prefixes expire on a schedule. `raw/` is deleted after 30 days.
 `curated/_partial/` is deleted after 3 days, which is the window in which a
-failed merge can still be re-run. Everything else is kept.
+failed merge can still be re-run. `curated/collector_run/` is deleted after
+30 days, by which time the merger has folded each day into
+`fact_collector_run`, which is kept. Everything else is kept.
 
 The leading underscore in `_partial` marks it as working state rather than a
 published table. Query the `fact_` tables instead unless you specifically
@@ -396,7 +407,7 @@ Among real observations, the latest wins.
 | `departure_delay_s` | `int32` | Seconds late leaving. Negative means early. | From `departure.delay`. Null when absent. |
 | `last_update_at_utc` | `timestamp[s, tz=UTC]` | When the last **real** observation for this stop was made. | `trip_update.timestamp` when the feed sent one, otherwise the poll time. Null when this stop was only ever echoed. |
 | `n_updates` | `int32` | How many real observations landed for this stop during this hour. Echoes are not counted, so `0` means the stop was listed but never genuinely reported on. | Counted during the reduction. Never null. |
-| `schedule_relationship` | `string` | What the feed last said about this stop: `SCHEDULED`, `SKIPPED`, `NO_DATA` or `UNSCHEDULED`. | The latest real observation's value once one exists; before that, whatever was last seen, including `NO_DATA`. Null only if the code could not recognise the value. |
+| `schedule_relationship` | `string` | What the feed last said about this stop: `SCHEDULED`, `SKIPPED`, `NO_DATA` or `UNSCHEDULED`. | The latest real observation's value once one exists; before that, whatever was last seen, including `NO_DATA`. Read without first asking whether the field was sent, so a value outside the list, or no value at all, reads as `SCHEDULED`. Set on the stop's first sighting, so never null. |
 | `trip_schedule_relationship` | `string` | What the feed said about the whole trip, e.g. `SCHEDULED`, `CANCELED`. Separate from the stop's own status. | Copied from `trip_update.trip.schedule_relationship`, taken when the row was first created. Null when not sent or not recognised. |
 | `had_vehicle` | `bool` | True if a bus was ever attached to this trip during the hour. | True once any poll carried `trip_update.vehicle`, and it never goes back to false. Never null. |
 | `lost_tracking` | `bool` | True when the bus went quiet part-way: a real observation landed, and then only echoes followed. The prediction is frozen at whatever it last said. | Computed at write time: true when `last_observed_at_utc` is later than `last_update_at_utc`. False when neither exists, because a stop that was never reported on was not lost. |
@@ -522,8 +533,9 @@ written with and without fractional seconds, comes back as text instead. See
 [DuckDB's JSON reader](https://duckdb.org/docs/stable/data/json/overview) for
 what it would otherwise guess.
 
-The source JSON under `collector_run/` is never deleted by this step, so it
-remains the authoritative copy, and any day can be rebuilt from it.
+The source JSON under `collector_run/` is left in place by this step, so
+any day can be rebuilt from it - but only until the bucket deletes it after
+30 days. Past that, `fact_collector_run` is the only copy.
 
 ---
 
@@ -534,7 +546,7 @@ one Parquet file each.
 
 They are snapshots, not a history. The loader downloads the bundle once a
 day and writes a new snapshot only when the bundle's contents have changed,
-under `valid_from=YYYY-MM-DD`, the Sydney date of the check that noticed the
+under `valid_from=YYYY-MM-DD`, the UTC date of the check that noticed the
 change. To use the timetable that applied on a given day, take the latest
 `valid_from` at or before it, which is what the merge does.
 
@@ -693,8 +705,9 @@ feed attempted.
 | `body_bytes` | `int` | Size of the response body in bytes, before compression. `0` on any failure. | Measured. |
 | `error` | `string` or null | What went wrong, in plain words. Null on success. | The transport error's message, or the literal `poll worker crashed unexpectedly` when the poll itself died. **A crash and a network failure are otherwise indistinguishable** - both give a null status, zero bytes and a null server date - and the message is human-readable text, not a code to branch on. |
 
-A failed fetch is stored as a row, not thrown away. A missing row means the
-poll never ran at all.
+A failed fetch is stored as a row, not thrown away. Inside the 30-day
+retention window a missing row means the poll never ran at all; past it,
+the JSONL has been deleted and `fact_collector_run` is where to look.
 
 The Parquet-backed copy of this table is
 [`fact_collector_run`](#fact_collector_run), which re-cuts these rows into
@@ -749,7 +762,7 @@ where `dt` is the UTC date of the check.
 | `zip_sha256` | `string` | A fingerprint of the downloaded zip's bytes, as 64 hex characters. Two downloads with the same fingerprint are the same timetable. | Computed over the whole file. |
 | `zip_filename` | `string` | The filename the server offered, e.g. `buses_GTFS_PROD_20260918103100.zip`. **Provenance only.** The timestamp in it changes on every rebuild whether or not the contents did, so it must never be used to detect change. | Read from the `Content-Disposition` header. `''` when the header is absent, or uses a form the parser does not handle. |
 | `changed` | `bool` | True when this fingerprint differs from the previous check's. Only a true here causes dimension snapshots to be written. | Compared against the most recent stored check. True on the very first check ever, since there is nothing to compare to. |
-| `valid_from` | `string` or null | The snapshot partition this check created, as `YYYY-MM-DD`, Sydney local. Matches the `valid_from=` folder under `curated/dim_*`. | The check date when `changed` is true. **Null when `changed` is false**, because no snapshot was written. |
+| `valid_from` | `string` or null | The snapshot partition this check created, as `YYYY-MM-DD`, UTC. Matches the `valid_from=` folder under `curated/dim_*`. | The check date when `changed` is true. **Null when `changed` is false**, because no snapshot was written. |
 
 To find which timetable was in force on a given day, take the largest
 `valid_from` at or before it. That is what the merge does when it resolves

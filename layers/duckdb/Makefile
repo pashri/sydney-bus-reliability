@@ -4,8 +4,8 @@
 # SAM runs this target itself, because the layer is declared with
 # `BuildMethod: makefile`, so there is no separate build step to forget.
 #
-# The duckdb version comes from `requirements.txt`, which the root
-# Makefile exports from uv.lock before calling sam build. SAM copies
+# The duckdb version comes from `requirements.txt`, which deploy.sh
+# exports from uv.lock before calling sam build. SAM copies
 # this directory elsewhere before running make, so the repository is
 # not reachable from here and the version cannot be looked up live.
 
@@ -13,8 +13,8 @@ build-DuckdbLayer:
 
 	@# duckdb is dev-only in pyproject.toml: a runtime dependency is
 	@# bundled into EVERY function's package, which pushed the schedule
-	@# loader over Lambda's 250 MB unzipped limit. Only the merger needs
-	@# duckdb, so it gets it from this layer instead.
+	@# loader over Lambda's 250 MB unzipped limit. Only the merger and
+	@# the checker need duckdb, so they get it from this layer instead.
 	@mkdir -p "$(ARTIFACTS_DIR)/python" > /dev/null
 
 	$(eval VERSION := $(shell sed -n 's/^duckdb==\([^ ;]*\).*/\1/p' requirements.txt))

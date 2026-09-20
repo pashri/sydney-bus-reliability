@@ -58,10 +58,7 @@ def validate_offset(*, offset: float) -> None:
     Raises
     ------
     ValueError
-        If ``offset`` is negative or at/beyond ``MAX_OFFSET_S``. The
-        Lambda timeout is 65s, so an offset at or past that leaves no
-        room to fetch and store: the invocation runs until Lambda
-        kills it, with no raw objects and no run record.
+        If ``offset`` is negative or at/beyond ``MAX_OFFSET_S``.
     """
     if offset < 0:
         raise ValueError(f'Offset {offset} must not be negative')

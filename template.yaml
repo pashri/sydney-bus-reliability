@@ -245,8 +245,10 @@ Resources:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmDescription: >-
-        No successful schedule loader run in 24 hours. Each missed
-        day is a permanently unrecoverable timetable, so this is the
+        No schedule loader invocation in 24 hours. Any invocation
+        clears it, failed ones included; ScheduleLoaderErrorAlarm is
+        what catches a run that happens and fails. Each missed day
+        is a permanently unrecoverable timetable, so this is the
         costliest silent failure in the system. 24h rather than the
         36h originally specified: CloudWatch caps an alarm's total
         evaluation window (Period x EvaluationPeriods) at 86400s.
@@ -377,8 +379,9 @@ Resources:
   DuckdbLayer:
     Metadata:
       Description: >-
-        DuckDB for the merger only, with the httpfs extension baked
-        in so no run depends on DuckDB's extension repository. Kept
+        DuckDB for the merger and the checker, with the httpfs and
+        aws extensions baked in so no run depends on DuckDB's
+        extension repository. Kept
         out of the shared requirements because a runtime dependency
         is bundled into every function's package, which took the
         schedule loader to 416 MB against a 250 MB limit.
@@ -409,7 +412,7 @@ Resources:
     Properties:
       Description: >-
         Assembles one Sydney service day from hourly partials at
-        ~04:00 local. Not midnight: GTFS trips run past midnight to a
+        08:00 local. Not midnight: GTFS trips run past midnight to a
         measured hour of 30, and finalising at midnight would truncate
         the night's last services.
       FunctionName: sydney-bus-reliability-merger
@@ -469,8 +472,10 @@ Resources:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmDescription: >-
-        No successful merger run in 24 hours. CloudWatch caps an
-        alarm's total evaluation window at 86400s, so the 36h of
+        No merger invocation in 24 hours. Any invocation clears it,
+        failed ones included; MergerErrorAlarm is what catches a run
+        that happens and fails. CloudWatch caps an alarm's total
+        evaluation window at 86400s, so the 36h of
         nightly-plus-slack originally specified is not expressible.
       AlarmName: merger-not-running
       Namespace: AWS/Lambda

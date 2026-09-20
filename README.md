@@ -46,8 +46,9 @@ AWS SAM: five Lambdas, two layers and one S3 bucket.
   `sam build` through
   `layers/duckdb/Makefile`, and the AWS-managed SDK-for-pandas layer
   supplying pyarrow, pinned by version
-- Lifecycle: `raw/` expires after 30 days, `curated/_partial/` after 3.
-  Everything else is kept
+- Lifecycle: `raw/` expires after 30 days, `curated/collector_run/` after
+  30 once the merger has folded it into `fact_collector_run`, and
+  `curated/_partial/` after 3. Everything else is kept
 - Python 3.14, managed with uv
 
 ## Deploy

@@ -239,9 +239,12 @@ the only symptom there is.
 Two harmless consequences follow.
 
 A new alarm of this kind fires the moment it is created, before its function
-has had a chance to run, and clears itself on the first successful run. This
-already happened: `schedule-loader-not-running` alerted at 15:19 on 19
-September and cleared at 15:22.
+has had a chance to run, and clears itself on the first run. It counts
+invocations rather than successes, so a run that fails clears it just as
+readily as one that works - a function that runs and fails is what the
+separate error alarms are for. This already happened:
+`schedule-loader-not-running` alerted at 15:19 on 19 September and cleared
+at 15:22.
 
 A 24-hour alarm watching a once-a-day job is also stable except on 4
 October, when the switch to daylight saving shifts the run by an hour and
@@ -251,12 +254,19 @@ self-clearing email around that date. Neither case is an outage.
 ### 12. Codes we don't recognise arrive as missing
 
 The live feeds use a format (protocol buffers, version 2) where each coded
-field has a fixed list of permitted values. If Transport for NSW ever sends a value outside that list,
-it does not arrive as a wrong-but-valid code - it does not arrive at all,
-and the field reads as empty. The unrecognised value itself is not preserved
-anywhere.
+field has a fixed list of permitted values. If Transport for NSW ever sends
+a value outside that list, it does not arrive as a wrong-but-valid code - it
+does not arrive at all, and the field reads as empty. The unrecognised value
+itself is not preserved anywhere.
 
-This is why the code always asks whether a field was actually sent rather
-than reading it directly. Several of these fields have a default that looks
-like a real answer - `current_status` defaults to "in transit to" - and a
-default is indistinguishable from a genuine reading unless you check.
+This is why most coded fields are read by first asking whether the field was
+sent, rather than reading it directly. Several of them have a default that
+looks like a real answer - `current_status` defaults to "in transit to" -
+and a default is indistinguishable from a genuine reading unless you check.
+
+Two things that check does not cover. Identifiers are read directly, so a
+missing one arrives as an empty string rather than as absent. And one coded
+field is read directly too: a stop's `schedule_relationship`, which reads as
+`SCHEDULED` when the value is unrecognised or was never sent. That is
+exactly the confusion the check exists to avoid, and it is worth knowing
+before treating a `SCHEDULED` stop as something the feed said.
