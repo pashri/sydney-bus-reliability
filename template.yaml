@@ -402,8 +402,13 @@ Resources:
       FunctionName: sydney-bus-reliability-merger
       CodeUri: src/
       Handler: merger.handler.handler
-      MemorySize: 2048
+      MemorySize: 3008  # the account's ceiling; 4096 is rejected
       Timeout: 600
+      # DuckDB sorts a whole service day and spills what will not fit
+      # in memory to /tmp. Lambda gives 512 MB there by default, which
+      # a full day of partials exhausts before the merge finishes.
+      EphemeralStorage:
+        Size: 8192
       # No ReservedConcurrentExecutions: account quota of 10 forbids it.
       Layers:
         - !Ref DuckdbLayer

@@ -52,7 +52,7 @@ The function's memory allocation buys it about one vCPU, and DuckDB
 sizes its own pool from the machine it detects rather than from that.
 """
 
-DUCKDB_MEMORY_LIMIT: Final[str] = '1500MB'
+DUCKDB_MEMORY_LIMIT: Final[str] = '2200MB'
 """Headroom below the function's allocation, so DuckDB spills first."""
 
 DUCKDB_TEMP_DIRECTORY: Final[str] = '/tmp'
