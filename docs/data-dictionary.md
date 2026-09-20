@@ -127,6 +127,12 @@ The derived tables are [Parquet](https://parquet.apache.org/docs/) files, a
 columnar binary format. Every column has a declared type, so the types in
 this document are what is actually stored, not a convention.
 
+They are compressed with zstd, and the fact tables are written in sorted
+order: trip stops by route, trip and stop; vehicle positions by route and
+time. Parquet records the smallest and largest value of every column in each
+block of rows, so a query filtered to one route can skip most of a day's
+blocks without reading them.
+
 ---
 
 ## How to read the tables
@@ -193,7 +199,7 @@ Everything sits in one S3 bucket, Amazon's flat file store.
       _partial/trip_stop/dt=YYYY-MM-DD/hour=HH/data.parquet
       fact_vehicle_position/service_date=YYYY-MM-DD/data.parquet
       fact_trip_stop/service_date=YYYY-MM-DD/data.parquet
-      fact_collector_run/service_date=YYYY-MM-DD/data.parquet
+      fact_collector_run/collection_date=YYYY-MM-DD/data.parquet
       dim_route/valid_from=YYYY-MM-DD/data.parquet
       dim_trip/...                  (and five more dimensions)
       collector_run/dt=YYYY-MM-DD/<invocation-id>.jsonl
@@ -205,11 +211,10 @@ query engines call Hive partitioning: the engine reads them as extra columns
 and uses them to skip files it does not need.
 
 A partition whose name matches a real column **shadows it**. `fact_trip_stop`
-has both a `service_date=` folder and a `service_date` column, and they are
-not the same value or the same type. An engine reading the folder gives you
-the partition; the file's own column is only visible with Hive partitioning
-switched off. Anything that reads a file and writes it back needs to opt out,
-or it silently rewrites the column with the partition's value.
+has both a `service_date=` folder and a `service_date` column. They hold the
+same date, deliberately, so it does not matter which one a reader gets. Where
+they ever diverge the folder wins, and anything that reads a file by its full
+path and writes it back would persist the folder's value over the column's.
 `dt` and `hour` under `raw/` and `_partial/` are **UTC**. `service_date=`
 and `valid_from=` are **Sydney dates**.
 
@@ -432,7 +437,7 @@ measured.
 
 | Column | Type | What it means | Where it comes from |
 | --- | --- | --- | --- |
-| `service_date` | `string` | The service day, `YYYYMMDD`, Sydney local. **Two different things share this name**: the stored column holds `20260918`, and the `service_date=` folder holds `2026-09-18`, which most query engines also expose as a column of that name. Where both are visible the folder wins, so a query can return a date where the file holds a string. Turn Hive partitioning off to read the column itself. | Carried through from the partial. |
+| `service_date` | `date32[day]` | The service day, Sydney local. Stored as a date so it matches the `service_date=` folder it is written under: most query engines expose that folder as a column of the same name, and if the two disagreed a reader would silently get one or the other. | Converted from the partial's `YYYYMMDD` text, which is how the feed sends it. |
 | `trip_id` | `string` | Which scheduled run. Joins to `dim_trip.trip_id`. | Carried through. |
 | `stop_id` | `string` | Which stop. Joins to `dim_stop.stop_id`. | Carried through. |
 | `stop_sequence` | `int32` | Position of this stop in the trip's order. | Carried through. |
@@ -485,19 +490,21 @@ collection process, folded from JSON into Parquet so it can be queried
 alongside everything else.
 
 Written to
-`curated/fact_collector_run/service_date=YYYY-MM-DD/data.parquet`.
+`curated/fact_collector_run/collection_date=YYYY-MM-DD/data.parquet`.
 
 The columns are those of [`collector_run`](#collector_run) below, which is
 the source, with one difference: the three timestamp columns are stored as
 `timestamp[us, tz=UTC]` here rather than as text.
 
-**The partition is a Sydney calendar day**, midnight to midnight, cut from
-the two UTC source partitions it spans. The cut uses Sydney's offset on the
+**The partition is `collection_date`, a Sydney calendar day**, midnight to
+midnight, cut from the two UTC source partitions it spans. It is named
+`collection_date` rather than `service_date` precisely because it is not
+one. The cut uses Sydney's offset on the
 day rather than a fixed one, because a Sydney day is 23 or 25 hours long
 across a daylight-saving change.
 
 That is deliberately not the same thing as `fact_trip_stop.service_date`,
-even though both are labelled with a Sydney date. A service day follows the
+even though both are Sydney dates. A service day follows the
 timetable and runs past midnight, so a trip that departs late is still being
 observed in the small hours of the next calendar day. The collector has no
 such shape: it polls on the clock, every minute, whether or not a bus is

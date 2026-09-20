@@ -10,7 +10,11 @@ import pytest
 
 from compactor.positions import POSITION_SCHEMA
 from compactor.trip_updates import TRIP_STOP_SCHEMA
-from merger.merge_sql import POSITION_MERGE, TRIP_STOP_MERGE
+from merger.merge_sql import (
+    POSITION_MERGE,
+    TRIP_STOP_MERGE,
+    build_trip_stop_query,
+)
 
 
 @pytest.fixture
@@ -520,7 +524,6 @@ def test_merged_counter_and_flag_survive_a_parquet_round_trip(
     schema = pq.read_schema(target)
     assert schema.field('n_updates').type == pa.int32()
     assert schema.field('is_reliable').type == pa.bool_()
-    assert schema.field('service_date').type == pa.string()
 
 
 def test_merged_columns_keep_the_partial_types(
@@ -546,14 +549,19 @@ def test_merged_columns_keep_the_partial_types(
     )
     target = tmp_path / 'fact.parquet'
     _connection.execute(
-        f"COPY ({TRIP_STOP_MERGE}) TO '{target}' (FORMAT PARQUET)",
+        f"COPY ({build_trip_stop_query(dim_source=None)}) TO '{target}' "
+        '(FORMAT PARQUET)',
         merge_params(glob=glob),
     )
     written = pq.read_schema(target)
+    # service_date is deliberately widened to a date, to agree with the
+    # service_date= partition it is written under. Everything else must
+    # arrive unchanged.
+    assert written.field('service_date').type == pa.date32()
     carried = [
         field for field in TRIP_STOP_SCHEMA
         if field.name in written.names
-        and field.name != 'last_observed_at_utc'
+        and field.name not in {'last_observed_at_utc', 'service_date'}
     ]
     assert carried
     for field in carried:

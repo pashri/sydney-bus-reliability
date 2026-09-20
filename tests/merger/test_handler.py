@@ -86,7 +86,7 @@ def test_merge_collector_run_folds_jsonl_to_parquet(
         Bucket=_bucket, Prefix='curated/fact_collector_run/',
     )
     assert [item['Key'] for item in written['Contents']] == [
-        'curated/fact_collector_run/service_date=2026-09-17/data.parquet',
+        'curated/fact_collector_run/collection_date=2026-09-17/data.parquet',
     ]
 
 
@@ -229,7 +229,7 @@ def test_merge_collector_run_stores_timestamps_as_instants(
     ) == 2
     body = boto3.client('s3').get_object(
         Bucket=_bucket,
-        Key='curated/fact_collector_run/service_date=2026-09-17/data.parquet',
+        Key='curated/fact_collector_run/collection_date=2026-09-17/data.parquet',
     )['Body'].read()
     schema = pq.read_schema(io.BytesIO(body))
     assert schema.field('fetched_at_utc').type == pa.timestamp('us', tz='UTC')
@@ -351,7 +351,8 @@ def test_handler_rebuilds_collector_run_without_any_partials(
         Bucket=_bucket, Prefix='curated/',
     )
     keys = {item['Key'] for item in written['Contents']}
-    assert 'curated/fact_collector_run/service_date=2026-09-17/data.parquet' in keys
+    assert ('curated/fact_collector_run/collection_date=2026-09-17'
+            '/data.parquet') in keys
     assert not any(key.startswith('curated/fact_trip_stop/') for key in keys)
 
 

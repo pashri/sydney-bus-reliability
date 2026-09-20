@@ -15,7 +15,7 @@ from aws_lambda_powertools import Logger
 
 logger = Logger()
 
-COMPRESSION: Final[Literal['snappy']] = 'snappy'
+COMPRESSION: Final[Literal['zstd']] = 'zstd'
 CONTENT_TYPE: Final[str] = 'application/vnd.apache.parquet'
 
 

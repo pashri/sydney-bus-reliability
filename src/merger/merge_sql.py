@@ -148,10 +148,17 @@ def build_trip_stop_query(*, dim_source: str | None) -> str:
     str
         A query selecting every ``TRIP_STOP_MERGE`` column plus
         ``scheduled_arrival_utc``, NULL for a row with no matching
-        schedule row.
+        schedule row. ``service_date`` is converted to a date, so it
+        matches the ``service_date=`` partition it is written under
+        rather than shadowing it with a different type.
 
     Notes
     -----
+    Rows are sorted by route, then trip, then stop. Parquet keeps
+    per-row-group minimum and maximum values, so a reader filtering on
+    a route can skip most of a day's groups instead of opening all of
+    them.
+
     Reproduces the wall-clock convention of
     ``common.service_day.scheduled_instant``. The GTFS clock
     offset is added to local midnight and the result localised to
@@ -186,21 +193,27 @@ def build_trip_stop_query(*, dim_source: str | None) -> str:
     WITH day_merge AS (
         {TRIP_STOP_MERGE}
     )
-    SELECT day_merge.*, {arrival} AS scheduled_arrival_utc
+    SELECT day_merge.* REPLACE (
+        strptime(day_merge.service_date, '%Y%m%d')::DATE AS service_date
+    ), {arrival} AS scheduled_arrival_utc
     FROM day_merge
     {join}
+    ORDER BY day_merge.route_id, day_merge.trip_id, day_merge.stop_sequence
     """
 
 
 POSITION_MERGE: Final[str] = """
-SELECT DISTINCT ON (vehicle_id, observed_at_utc, lat, lon)
-    * EXCLUDE (dt, hour)
-FROM read_parquet($partials, hive_partitioning = true)
-WHERE dt >= $dt_from
-  AND dt <= $dt_to
-  AND observed_at_utc >= $window_start
-  AND observed_at_utc <  $window_end
-ORDER BY vehicle_id, observed_at_utc, lat, lon, fetched_at_utc
+SELECT * FROM (
+    SELECT DISTINCT ON (vehicle_id, observed_at_utc, lat, lon)
+        * EXCLUDE (dt, hour)
+    FROM read_parquet($partials, hive_partitioning = true)
+    WHERE dt >= $dt_from
+      AND dt <= $dt_to
+      AND observed_at_utc >= $window_start
+      AND observed_at_utc <  $window_end
+    ORDER BY vehicle_id, observed_at_utc, lat, lon, fetched_at_utc
+)
+ORDER BY route_id, observed_at_utc
 """
 """Deduplicate positions again at the day level.
 
@@ -214,4 +227,9 @@ movement.
 The ``dt`` bounds prune partial objects by partition path, before any
 footer is read. ``observed_at_utc`` still decides which rows belong to
 the day.
+
+The inner ordering belongs to ``DISTINCT ON``, which uses it to pick
+which duplicate survives, so the output ordering is applied outside it.
+Rows are written sorted by route and time, which lets a reader skip
+row groups rather than opening every one.
 """

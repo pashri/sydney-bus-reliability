@@ -246,6 +246,7 @@ def collector_run_query(*, globs: list[str]) -> str:
       AND CAST(fetched_at_utc AS TIMESTAMPTZ) < (
           CAST($day AS TIMESTAMP) + INTERVAL 1 DAY
       ) AT TIME ZONE '{SYDNEY.key}'
+    ORDER BY fetched_at_utc, feed
     """
 
 
@@ -264,8 +265,10 @@ def merge_collector_run(
     it directly.
 
     The source is partitioned by UTC fetch date and the output by
-    Sydney service date, so one output day is cut from the two source
-    partitions it spans. The cut is made with a named timezone rather
+    Sydney calendar date, under ``collection_date`` rather than
+    ``service_date``: the collector polls on the clock, so its day is
+    midnight to midnight and not the timetable's day. One output day
+    is cut from the two source partitions it spans. The cut is made with a named timezone rather
     than a fixed offset, because a Sydney day is 23 or 25 hours long
     across a daylight-saving transition.
 
@@ -300,11 +303,11 @@ def merge_collector_run(
     configure(connection=connection, endpoint=endpoint)
     target = (
         f's3://{bucket}/curated/fact_collector_run/'
-        f'service_date={service_date:%Y-%m-%d}/data.parquet'
+        f'collection_date={service_date:%Y-%m-%d}/data.parquet'
     )
     connection.execute(
         f'COPY ({collector_run_query(globs=globs)}) '
-        f"TO '{target}' (FORMAT PARQUET, COMPRESSION SNAPPY)",
+        f"TO '{target}' (FORMAT PARQUET, COMPRESSION ZSTD)",
         {'day': f'{service_date:%Y-%m-%d}'},
     )
     return count_parquet_rows(connection=connection, target=target)
@@ -639,7 +642,7 @@ def merge_trip_stops(
     dt_from, dt_to = partition_bounds(window=window)
     connection.execute(
         f"COPY ({query}) TO '{target}' "
-        f'(FORMAT PARQUET, COMPRESSION SNAPPY)',
+        f'(FORMAT PARQUET, COMPRESSION ZSTD)',
         {
             'partials': glob,
             'service_date': f'{service_date:%Y%m%d}',
@@ -683,7 +686,7 @@ def merge_positions(
     dt_from, dt_to = partition_bounds(window=window)
     connection.execute(
         f"COPY ({POSITION_MERGE}) TO '{target}' "
-        f'(FORMAT PARQUET, COMPRESSION SNAPPY)',
+        f'(FORMAT PARQUET, COMPRESSION ZSTD)',
         {
             'partials': glob,
             'window_start': window[0],
