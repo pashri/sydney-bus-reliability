@@ -16,8 +16,11 @@ was due is a forecast, not an observation.
 
 TRIP_STOP_MERGE: Final[str] = f"""
 WITH partials AS (
-    SELECT * FROM read_parquet($partials)
-    WHERE service_date = $service_date
+    SELECT * EXCLUDE (dt, hour)
+    FROM read_parquet($partials, hive_partitioning = true)
+    WHERE dt >= $dt_from
+      AND dt <= $dt_to
+      AND service_date = $service_date
 ),
 latest AS (
     SELECT
@@ -104,6 +107,13 @@ window function orders by it descending. A key with no real
 observation at all was never reported rather than lost, so it is not
 flagged.
 
+The ``dt`` bounds prune whole partial objects before their Parquet
+footers are read. They do not select the service day, which
+``service_date`` still does; they only stop the glob widening with
+every day ever collected. ``dt`` and ``hour`` come from the partition
+path rather than the data, so they are excluded to keep the merged
+columns identical to the partial's own.
+
 The ``ROW_NUMBER()`` tiebreak is deterministic. Ties on
 ``last_update_at_utc``, usually both NULL for pre-departure echoes,
 break on ``last_observed_at_utc``, which is set on every row
@@ -173,9 +183,12 @@ def build_trip_stop_query(*, dim_source: str | None) -> str:
 
 
 POSITION_MERGE: Final[str] = """
-SELECT DISTINCT ON (vehicle_id, observed_at_utc, lat, lon) *
-FROM read_parquet($partials)
-WHERE observed_at_utc >= $window_start
+SELECT DISTINCT ON (vehicle_id, observed_at_utc, lat, lon)
+    * EXCLUDE (dt, hour)
+FROM read_parquet($partials, hive_partitioning = true)
+WHERE dt >= $dt_from
+  AND dt <= $dt_to
+  AND observed_at_utc >= $window_start
   AND observed_at_utc <  $window_end
 ORDER BY vehicle_id, observed_at_utc, lat, lon, fetched_at_utc
 """
@@ -187,4 +200,8 @@ key includes position for the same reason it does in the compactor:
 hundreds of samples per peak hour share a timestamp while reporting a
 different location, and deduping on the pair alone would discard real
 movement.
+
+The ``dt`` bounds prune partial objects by partition path, before any
+footer is read. ``observed_at_utc`` still decides which rows belong to
+the day.
 """

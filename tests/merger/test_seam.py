@@ -79,7 +79,12 @@ def test_compactor_output_round_trips_into_the_merger(
     )
     result = connection.execute(
         TRIP_STOP_MERGE,
-        {'partials': glob, 'service_date': '20260917'},
+        {
+            'partials': glob,
+            'service_date': '20260917',
+            'dt_from': '2026-09-01',
+            'dt_to': '2026-10-01',
+        },
     ).fetchall()
     columns = [d[0] for d in connection.description]
     merged = dict(zip(columns, result[0]))

@@ -30,8 +30,14 @@ def write_partials(
     tmp_path: Path,
     rows: list[dict[str, object]],
     schema: pa.Schema,
+    dt: str = '2026-09-16',
+    hour: str = '21',
 ) -> str:
     """Write partial rows to a Parquet file and return its glob.
+
+    The file goes under ``dt=<dt>/hour=<hour>/``, matching the layout
+    the compactor writes, because the merge SQL reads those path
+    segments as hive partition columns.
 
     Parameters
     ----------
@@ -44,15 +50,54 @@ def write_partials(
         column that is all-None in one fixture would otherwise infer
         as pyarrow's null type and break DuckDB's typed arithmetic
         the moment a real value is missing.
+    dt : str
+        UTC date partition to write into.
+    hour : str
+        UTC hour partition to write into.
 
     Returns
     -------
     str
-        A glob matching the written file.
+        A glob matching every partition written under ``tmp_path``.
     """
     table = pa.Table.from_pylist(rows, schema=schema)
-    pq.write_table(table, tmp_path / 'hour=21.parquet')
-    return str(tmp_path / '*.parquet')
+    partition = tmp_path / f'dt={dt}' / f'hour={hour}'
+    partition.mkdir(parents=True, exist_ok=True)
+    pq.write_table(table, partition / 'data.parquet')
+    return str(tmp_path / 'dt=*' / 'hour=*' / 'data.parquet')
+
+
+def merge_params(
+    *,
+    glob: str,
+    service_date: str = '20260917',
+    dt_from: str = '2026-09-01',
+    dt_to: str = '2026-10-01',
+) -> dict[str, str]:
+    """Build the parameters ``TRIP_STOP_MERGE`` binds.
+
+    Parameters
+    ----------
+    glob : str
+        Glob matching the partials to read.
+    service_date : str
+        Service date to assemble, as ``YYYYMMDD``.
+    dt_from : str
+        Earliest ``dt`` partition to scan, as ``YYYY-MM-DD``.
+    dt_to : str
+        Latest ``dt`` partition to scan, as ``YYYY-MM-DD``.
+
+    Returns
+    -------
+    dict[str, str]
+        Parameters for the merge query.
+    """
+    return {
+        'partials': glob,
+        'service_date': service_date,
+        'dt_from': dt_from,
+        'dt_to': dt_to,
+    }
 
 
 def trip_row(
@@ -170,7 +215,7 @@ def test_n_updates_sums_across_partials(
         tmp_path=tmp_path, rows=rows, schema=TRIP_STOP_SCHEMA,
     )
     result = _connection.execute(
-        TRIP_STOP_MERGE, {'partials': glob, 'service_date': '20260917'},
+        TRIP_STOP_MERGE, merge_params(glob=glob),
     ).fetchall()
     assert len(result) == 1
     columns = [d[0] for d in _connection.description]
@@ -200,7 +245,7 @@ def test_latest_real_prediction_wins(
         tmp_path=tmp_path, rows=rows, schema=TRIP_STOP_SCHEMA,
     )
     result = _connection.execute(
-        TRIP_STOP_MERGE, {'partials': glob, 'service_date': '20260917'},
+        TRIP_STOP_MERGE, merge_params(glob=glob),
     ).fetchall()
     columns = [d[0] for d in _connection.description]
     assert dict(zip(columns, result[0]))['delay_s'] == 300
@@ -227,7 +272,7 @@ def test_no_join_fan_out(
         tmp_path=tmp_path, rows=rows, schema=TRIP_STOP_SCHEMA,
     )
     result = _connection.execute(
-        TRIP_STOP_MERGE, {'partials': glob, 'service_date': '20260917'},
+        TRIP_STOP_MERGE, merge_params(glob=glob),
     ).fetchall()
     assert len(result) == 1
 
@@ -250,7 +295,7 @@ def test_lost_tracking_reflects_the_final_dropout(
         tmp_path=tmp_path, rows=rows, schema=TRIP_STOP_SCHEMA,
     )
     result = _connection.execute(
-        TRIP_STOP_MERGE, {'partials': glob, 'service_date': '20260917'},
+        TRIP_STOP_MERGE, merge_params(glob=glob),
     ).fetchall()
     columns = [d[0] for d in _connection.description]
     merged = dict(zip(columns, result[0]))
@@ -278,7 +323,7 @@ def test_never_reported_key_is_not_lost_tracking(
         tmp_path=tmp_path, rows=[row], schema=TRIP_STOP_SCHEMA,
     )
     result = _connection.execute(
-        TRIP_STOP_MERGE, {'partials': glob, 'service_date': '20260917'},
+        TRIP_STOP_MERGE, merge_params(glob=glob),
     ).fetchall()
     columns = [d[0] for d in _connection.description]
     merged = dict(zip(columns, result[0]))
@@ -328,7 +373,7 @@ def test_a_later_real_hour_clears_an_earlier_dropout(
         tmp_path=tmp_path, rows=rows, schema=TRIP_STOP_SCHEMA,
     )
     result = _connection.execute(
-        TRIP_STOP_MERGE, {'partials': glob, 'service_date': '20260917'},
+        TRIP_STOP_MERGE, merge_params(glob=glob),
     ).fetchall()
     columns = [d[0] for d in _connection.description]
     merged = dict(zip(columns, result[0]))
@@ -361,7 +406,7 @@ def test_loop_route_stop_sequence_keeps_both_calls(
         tmp_path=tmp_path, rows=rows, schema=TRIP_STOP_SCHEMA,
     )
     result = _connection.execute(
-        TRIP_STOP_MERGE, {'partials': glob, 'service_date': '20260917'},
+        TRIP_STOP_MERGE, merge_params(glob=glob),
     ).fetchall()
     assert len(result) == 2
     columns = [d[0] for d in _connection.description]
@@ -389,7 +434,7 @@ def test_null_delay_is_not_reliable(
         tmp_path=tmp_path, rows=[row], schema=TRIP_STOP_SCHEMA,
     )
     result = _connection.execute(
-        TRIP_STOP_MERGE, {'partials': glob, 'service_date': '20260917'},
+        TRIP_STOP_MERGE, merge_params(glob=glob),
     ).fetchall()
     columns = [d[0] for d in _connection.description]
     merged = dict(zip(columns, result[0]))
@@ -411,11 +456,120 @@ def test_stale_prediction_beyond_lead_is_not_reliable(
         tmp_path=tmp_path, rows=[row], schema=TRIP_STOP_SCHEMA,
     )
     result = _connection.execute(
-        TRIP_STOP_MERGE, {'partials': glob, 'service_date': '20260917'},
+        TRIP_STOP_MERGE, merge_params(glob=glob),
     ).fetchall()
     columns = [d[0] for d in _connection.description]
     merged = dict(zip(columns, result[0]))
     assert not merged['is_reliable']
+
+
+def test_hive_partition_columns_are_not_merged_in(
+    _connection: duckdb.DuckDBPyConnection,
+    tmp_path: Path,
+) -> None:
+    """``dt`` and ``hour`` come from the path and must not be output.
+
+    They exist only so whole objects can be pruned before their
+    footers are read. Letting them through would change the merged
+    schema away from the partial's own.
+    """
+    rows = [
+        trip_row(
+            hour=20,
+            n_updates=1,
+            delay=60,
+            last_update=datetime(2026, 9, 16, 20, 30, tzinfo=UTC),
+        ),
+    ]
+    glob = write_partials(
+        tmp_path=tmp_path, rows=rows, schema=TRIP_STOP_SCHEMA,
+    )
+    _connection.execute(TRIP_STOP_MERGE, merge_params(glob=glob))
+    columns = {d[0] for d in _connection.description}
+    assert not columns & {'dt', 'hour'}
+    assert 'service_date' in columns
+
+
+def test_position_merge_drops_hive_partition_columns(
+    _connection: duckdb.DuckDBPyConnection,
+    tmp_path: Path,
+) -> None:
+    """The position merge selects ``*``, so it must exclude them too."""
+    rows = [
+        position_row(
+            vehicle_id='v1',
+            observed_at=datetime(2026, 9, 16, 20, 30, tzinfo=UTC),
+            lat=-33.8,
+            lon=151.2,
+            fetched_at=datetime(2026, 9, 16, 20, 31, tzinfo=UTC),
+        ),
+    ]
+    glob = write_partials(
+        tmp_path=tmp_path, rows=rows, schema=POSITION_SCHEMA,
+    )
+    _connection.execute(
+        POSITION_MERGE,
+        {
+            'partials': glob,
+            'window_start': datetime(2026, 9, 16, 20, 0, tzinfo=UTC),
+            'window_end': datetime(2026, 9, 16, 21, 0, tzinfo=UTC),
+            'dt_from': '2026-09-01',
+            'dt_to': '2026-10-01',
+        },
+    )
+    columns = {d[0] for d in _connection.description}
+    assert not columns & {'dt', 'hour'}
+    assert set(POSITION_SCHEMA.names) <= columns
+
+
+def test_partitions_outside_the_bounds_are_not_read(
+    _connection: duckdb.DuckDBPyConnection,
+    tmp_path: Path,
+) -> None:
+    """A partial outside the ``dt`` bounds does not reach the merge.
+
+    Its rows carry the service date under assembly, so reading it
+    would change the answer. Only the partition path excludes it.
+    """
+    write_partials(
+        tmp_path=tmp_path,
+        rows=[
+            trip_row(
+                hour=20,
+                n_updates=1,
+                delay=60,
+                last_update=datetime(2026, 9, 16, 20, 30, tzinfo=UTC),
+            ),
+        ],
+        schema=TRIP_STOP_SCHEMA,
+    )
+    glob = write_partials(
+        tmp_path=tmp_path,
+        rows=[
+            trip_row(
+                hour=20,
+                n_updates=500,
+                delay=60,
+                last_update=datetime(2026, 8, 1, 20, 30, tzinfo=UTC),
+            ),
+        ],
+        schema=TRIP_STOP_SCHEMA,
+        dt='2026-08-01',
+        hour='20',
+    )
+    result = _connection.execute(
+        TRIP_STOP_MERGE,
+        merge_params(glob=glob, dt_from='2026-09-15', dt_to='2026-09-18'),
+    ).fetchall()
+    columns = [d[0] for d in _connection.description]
+    assert len(result) == 1
+    assert dict(zip(columns, result[0]))['n_updates'] == 1
+
+    widened = _connection.execute(
+        TRIP_STOP_MERGE,
+        merge_params(glob=glob, dt_from='2026-08-01', dt_to='2026-09-18'),
+    ).fetchall()
+    assert dict(zip(columns, widened[0]))['n_updates'] == 501
 
 
 def test_position_merge_dedupes_on_key(
@@ -461,6 +615,8 @@ def test_position_merge_dedupes_on_key(
             'partials': glob,
             'window_start': datetime(2026, 9, 16, 20, 0, tzinfo=UTC),
             'window_end': datetime(2026, 9, 16, 21, 0, tzinfo=UTC),
+            'dt_from': '2026-09-01',
+            'dt_to': '2026-10-01',
         },
     ).fetchall()
     assert len(result) == 2

@@ -369,10 +369,11 @@ Resources:
   DuckdbLayer:
     Metadata:
       Description: >-
-        DuckDB for the merger only. Kept out of the shared
-        requirements because a runtime dependency is bundled into
-        every function's package, which took the schedule loader to
-        416 MB against a 250 MB limit.
+        DuckDB for the merger only, with the httpfs extension baked
+        in so no run depends on DuckDB's extension repository. Kept
+        out of the shared requirements because a runtime dependency
+        is bundled into every function's package, which took the
+        schedule loader to 416 MB against a 250 MB limit.
     Type: AWS::Serverless::LayerVersion
     Properties:
       LayerName: sydney-bus-reliability-duckdb
@@ -406,16 +407,21 @@ Resources:
       # No ReservedConcurrentExecutions: account quota of 10 forbids it.
       Layers:
         - !Ref DuckdbLayer
-      # No pyarrow layer. The managed layer (192.1 MB) plus duckdb
-      # (55.1 MB) is 247.5 MB against a 250 MB ceiling - a
-      # coincidence, not a margin. DuckDB reads and writes Parquet
-      # natively without pyarrow, so the merger takes duckdb alone.
+      # The duckdb layer only. Lambda's 250 MB unzipped limit counts
+      # a function's package plus every layer attached to it, so this
+      # function cannot also take the pyarrow layer the compactor and
+      # schedule loader use: 192.1 MB of that plus about 72 MB of
+      # duckdb carrying httpfs is over the ceiling. DuckDB reads and
+      # writes Parquet natively, so the merger does not need pyarrow.
       Environment:
         Variables:
           BUCKET_NAME: !Ref DataBucket
           POWERTOOLS_SERVICE_NAME: merger
           POWERTOOLS_LOG_LEVEL: INFO
-          HOME: /tmp  # duckdb extension cache needs a writable home
+          # The layer bakes in httpfs, so nothing is downloaded at
+          # runtime. HOME stays writable for the fallback path, which
+          # fetches it if the baked copy is ever missing.
+          HOME: /tmp
       Policies:
         - Statement:
             # Reads curated/collector_run/ and curated/_partial/,

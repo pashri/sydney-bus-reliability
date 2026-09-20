@@ -18,8 +18,10 @@ from compactor.trip_updates import TRIP_STOP_SCHEMA
 from merger.handler import (
     configure,
     handler,
+    load_extensions,
     merge_trip_stops,
     partial_hour_from_key,
+    partition_bounds,
     target_service_date,
 )
 from schedule_loader.dimensions import SCHEDULED_STOP_TIME_SCHEMA
@@ -78,6 +80,76 @@ def test_merge_collector_run_folds_jsonl_to_parquet(
         bucket=_bucket, service_date=date(2026, 9, 17),
         endpoint=_s3_endpoint,
     ) == 3
+
+
+def test_partition_bounds_pad_the_merge_window() -> None:
+    """The bounds cover the window's UTC dates, plus a day each side.
+
+    The padding matters because a trip is listed in the feed before it
+    departs, so a service date appears in partials written before its
+    own window opens.
+    """
+    window = merge_window(service_date=date(2026, 9, 17))
+    assert partition_bounds(window=window) == (
+        '2026-09-15', '2026-09-18',
+    )
+
+
+def test_partition_bounds_cover_a_daylight_saving_transition() -> None:
+    """The window shifts with the UTC offset; the bounds still hold."""
+    window = merge_window(service_date=date(2026, 4, 5))
+    dt_from, dt_to = partition_bounds(window=window)
+    assert dt_from <= f'{window[0]:%Y-%m-%d}'
+    assert dt_to >= f'{window[1]:%Y-%m-%d}'
+
+
+def test_load_extensions_prefers_the_baked_httpfs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """A layer copy of httpfs is loaded without reaching the network.
+
+    The merger cold-starts on every scheduled run, so an extension
+    fetched at runtime would put DuckDB's extension repository on the
+    critical path of every merge.
+    """
+    staging = duckdb.connect(
+        config={'extension_directory': str(tmp_path)},
+    )
+    staging.execute('INSTALL httpfs;')
+    baked = next(tmp_path.glob('*/*/httpfs.duckdb_extension'))
+    monkeypatch.setattr('merger.handler.HTTPFS_EXTENSION', baked)
+
+    connection = duckdb.connect()
+    load_extensions(connection=connection)
+
+    loaded = connection.execute(
+        "SELECT loaded FROM duckdb_extensions() "
+        "WHERE extension_name = 'httpfs'",
+    ).fetchone()
+    autoinstall = connection.execute(
+        "SELECT current_setting('autoinstall_known_extensions')",
+    ).fetchone()
+    assert loaded == (True,)
+    assert autoinstall == (False,)
+
+
+def test_configure_resolves_a_named_timezone(
+    _bucket: str, _s3_endpoint: str,
+) -> None:
+    """icu is available without being installed at runtime.
+
+    It is compiled into the DuckDB wheel. Without it ``AT TIME ZONE``
+    cannot resolve ``Australia/Sydney``, and every scheduled arrival
+    would be an hour out for half the year.
+    """
+    connection = duckdb.connect()
+    configure(connection=connection, endpoint=_s3_endpoint)
+    resolved = connection.execute(
+        "SELECT TIMESTAMP '2026-04-05 09:00:00' "
+        "AT TIME ZONE 'Australia/Sydney'",
+    ).fetchone()
+    assert resolved is not None
+    assert resolved[0] == datetime(2026, 4, 4, 23, 0, tzinfo=UTC)
 
 
 def test_partial_hour_from_key_rejects_a_malformed_key() -> None:
@@ -307,6 +379,7 @@ def test_merge_trip_stops_resolves_scheduled_arrival(
         connection=connection,
         bucket=_bucket,
         service_date=service_date,
+        window=merge_window(service_date=service_date),
         session=boto3.Session(),
     )
     body = client.get_object(

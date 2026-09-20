@@ -11,6 +11,7 @@ Sydney observes daylight saving and the UTC offset changes mid-season.
 
 import os
 from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
 from typing import Any, Final, TypedDict
 
 import boto3
@@ -27,6 +28,27 @@ from merger.merge_sql import POSITION_MERGE, build_trip_stop_query
 logger = Logger()
 
 PARTIAL_PREFIX: Final[str] = 'curated/_partial'
+
+HTTPFS_EXTENSION: Final[Path] = Path(
+    '/opt/python/duckdb_extensions/httpfs.duckdb_extension',
+)
+"""Where ``scripts/build_duckdb_layer.sh`` puts httpfs in the layer."""
+
+DUCKDB_THREADS: Final[int] = 2
+"""Worker threads.
+
+The function's memory allocation buys it about one vCPU, and DuckDB
+sizes its own pool from the machine it detects rather than from that.
+"""
+
+DUCKDB_MEMORY_LIMIT: Final[str] = '1500MB'
+"""Headroom below the function's allocation, so DuckDB spills first."""
+
+DUCKDB_TEMP_DIRECTORY: Final[str] = '/tmp'
+"""Where spilled data goes. The only writable path on Lambda."""
+
+PARTITION_MARGIN: Final[timedelta] = timedelta(days=1)
+"""Slack on each side of the ``dt`` bounds a merge window implies."""
 
 
 class UnmeasuredCurationCounts(TypedDict):
@@ -107,10 +129,124 @@ def configure(
         ``mock_aws()`` cannot intercept it and tests must point it at
         a real local moto server instead.
     """
-    connection.execute('INSTALL httpfs; LOAD httpfs;')
-    # icu powers AT TIME ZONE with a named zone, used to resolve
-    # scheduled_arrival_utc in pure SQL (see build_trip_stop_query).
-    connection.execute('INSTALL icu; LOAD icu;')
+    load_extensions(connection=connection)
+    apply_limits(connection=connection)
+    create_s3_secret(connection=connection, endpoint=endpoint)
+
+
+def load_extensions(*, connection: duckdb.DuckDBPyConnection) -> None:
+    """Load the extensions the merge SQL needs.
+
+    ``httpfs`` backs every ``s3://`` read and write. ``icu`` backs
+    ``AT TIME ZONE`` with a named zone, which resolves
+    ``scheduled_arrival_utc``; it is compiled into the DuckDB wheel and
+    loads without a download.
+
+    The layer ships httpfs so that a run never depends on DuckDB's
+    extension repository being reachable. Off Lambda the layer is
+    absent, and httpfs is fetched from that repository instead.
+
+    Parameters
+    ----------
+    connection : duckdb.DuckDBPyConnection
+        Connection to load into.
+    """
+    if HTTPFS_EXTENSION.exists():
+        connection.execute('SET autoinstall_known_extensions = false')
+        connection.execute('SET autoload_known_extensions = false')
+        connection.execute(f"LOAD '{HTTPFS_EXTENSION}';")
+    else:
+        connection.execute('INSTALL httpfs; LOAD httpfs;')
+    connection.execute('LOAD icu;')
+
+
+def apply_limits(*, connection: duckdb.DuckDBPyConnection) -> None:
+    """Bound DuckDB's threads and memory to the function's allocation.
+
+    DuckDB sizes both from the machine it detects, which in a container
+    can be the host rather than the slice the function was given. Left
+    alone it can run more workers than there is CPU for, and believe it
+    has memory it does not have, so it never spills before the runtime
+    kills the process.
+
+    Parameters
+    ----------
+    connection : duckdb.DuckDBPyConnection
+        Connection to bound.
+    """
+    connection.execute(f'SET threads = {DUCKDB_THREADS}')
+    connection.execute(f"SET memory_limit = '{DUCKDB_MEMORY_LIMIT}'")
+    connection.execute(
+        f"SET temp_directory = '{DUCKDB_TEMP_DIRECTORY}'",
+    )
+    logger.info(
+        'DuckDB limits applied',
+        extra=effective_limits(connection=connection),
+    )
+
+
+def effective_limits(
+    *,
+    connection: duckdb.DuckDBPyConnection,
+) -> dict[str, str]:
+    """Read back the limits DuckDB is actually running under.
+
+    Parameters
+    ----------
+    connection : duckdb.DuckDBPyConnection
+        Connection to interrogate.
+
+    Returns
+    -------
+    dict[str, str]
+        Each setting's name and its current value.
+    """
+    settings = ('threads', 'memory_limit', 'temp_directory')
+    return {
+        name: setting_value(connection=connection, name=name)
+        for name in settings
+    }
+
+
+def setting_value(
+    *,
+    connection: duckdb.DuckDBPyConnection,
+    name: str,
+) -> str:
+    """Read one DuckDB setting's current value.
+
+    Parameters
+    ----------
+    connection : duckdb.DuckDBPyConnection
+        Connection to interrogate.
+    name : str
+        Setting to read.
+
+    Returns
+    -------
+    str
+        The setting's value, or an empty string if it has none.
+    """
+    result = connection.execute(
+        f"SELECT current_setting('{name}')",
+    ).fetchone()
+    return str(result[0]) if result else ''
+
+
+def create_s3_secret(
+    *,
+    connection: duckdb.DuckDBPyConnection,
+    endpoint: str | None = None,
+) -> None:
+    """Give a connection credentials for S3.
+
+    Parameters
+    ----------
+    connection : duckdb.DuckDBPyConnection
+        Connection to configure.
+    endpoint : str | None
+        Override S3 endpoint, host[:port] only.
+    """
     # CHAIN 'env' pins credential resolution to environment variables,
     # which is what both the Lambda runtime and the test fixtures set,
     # rather than DuckDB's default order which checks a local
@@ -243,6 +379,37 @@ def expected_hours(
         hours.append(cursor)
         cursor += timedelta(hours=1)
     return hours
+
+
+def partition_bounds(
+    *,
+    window: tuple[datetime, datetime],
+) -> tuple[str, str]:
+    """Bound the ``dt`` partitions a merge window can touch.
+
+    The bounds prune whole partial objects by their partition path,
+    before any Parquet footer is read, so a merge costs what the window
+    holds rather than everything ever collected. They are deliberately
+    loose: a trip is listed in the feed for hours before it departs, so
+    a service date can first appear in a partial written before its own
+    window opens.
+
+    Parameters
+    ----------
+    window : tuple[datetime, datetime]
+        UTC start and end of the hours to read, as returned by
+        ``merge_window``.
+
+    Returns
+    -------
+    tuple[str, str]
+        Inclusive ``dt`` partition values, as ``YYYY-MM-DD``.
+    """
+    start, end = window
+    return (
+        f'{(start - PARTITION_MARGIN).date():%Y-%m-%d}',
+        f'{(end + PARTITION_MARGIN).date():%Y-%m-%d}',
+    )
 
 
 def partial_hour_from_key(*, key: str) -> datetime:
@@ -452,6 +619,7 @@ def merge_trip_stops(
     connection: duckdb.DuckDBPyConnection,
     bucket: str,
     service_date: date,
+    window: tuple[datetime, datetime],
     session: boto3.Session | None = None,
 ) -> int:
     """Fold one service day's trip-stop partials into one table.
@@ -464,6 +632,9 @@ def merge_trip_stops(
         Bucket holding the curated layer.
     service_date : date
         The Sydney service date being assembled.
+    window : tuple[datetime, datetime]
+        UTC range of partials to read, used to bound the partitions
+        scanned.
     session : boto3.Session | None
         Optional boto3 session, used to list dimension snapshots.
         Defaults to a new session.
@@ -483,10 +654,16 @@ def merge_trip_stops(
         session=session or boto3.Session(),
     )
     query = build_trip_stop_query(dim_source=dim_source)
+    dt_from, dt_to = partition_bounds(window=window)
     connection.execute(
         f"COPY ({query}) TO '{target}' "
         f'(FORMAT PARQUET, COMPRESSION SNAPPY)',
-        {'partials': glob, 'service_date': f'{service_date:%Y%m%d}'},
+        {
+            'partials': glob,
+            'service_date': f'{service_date:%Y%m%d}',
+            'dt_from': dt_from,
+            'dt_to': dt_to,
+        },
     )
     return count_parquet_rows(connection=connection, target=target)
 
@@ -521,6 +698,7 @@ def merge_positions(
         f's3://{bucket}/curated/fact_vehicle_position/'
         f'service_date={service_date:%Y-%m-%d}/data.parquet'
     )
+    dt_from, dt_to = partition_bounds(window=window)
     connection.execute(
         f"COPY ({POSITION_MERGE}) TO '{target}' "
         f'(FORMAT PARQUET, COMPRESSION SNAPPY)',
@@ -528,6 +706,8 @@ def merge_positions(
             'partials': glob,
             'window_start': window[0],
             'window_end': window[1],
+            'dt_from': dt_from,
+            'dt_to': dt_to,
         },
     )
     return count_parquet_rows(connection=connection, target=target)
@@ -665,7 +845,7 @@ def handler(
     )
     trip_rows = merge_trip_stops(
         connection=connection, bucket=bucket, service_date=service_date,
-        session=session,
+        window=window, session=session,
     )
     position_rows = merge_positions(
         connection=connection, bucket=bucket,
