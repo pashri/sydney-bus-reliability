@@ -3,12 +3,12 @@
 import pyarrow as pa
 import pytest
 
+from analysis.reference.osrm import RoutingStatus
 from analysis.reference.schemas import (
     STOP_GEOGRAPHY_SCHEMA,
     STOP_MESHBLOCK_SCHEMA,
     VINTAGE_FIELDS,
     GeographyMatch,
-    RoutingStatus,
 )
 
 SCHEMAS = (STOP_GEOGRAPHY_SCHEMA, STOP_MESHBLOCK_SCHEMA)

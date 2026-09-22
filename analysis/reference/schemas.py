@@ -24,15 +24,6 @@ class GeographyMatch(StrEnum):
     UNMATCHED = 'unmatched'
 
 
-class RoutingStatus(StrEnum):
-    """What happened when a walking distance was requested."""
-
-    ROUTED = 'routed'
-    UNROUTABLE = 'unroutable'
-    SNAP_FAILED = 'snap_failed'
-    NOT_ATTEMPTED = 'not_attempted'
-
-
 VINTAGE_FIELDS: Final[list[pa.Field[Any]]] = [
     pa.field('vintage', pa.date32()),
     pa.field('asgs_edition', pa.string()),

@@ -804,8 +804,10 @@ interior point lies within 1600 m of the stop.
 | --- | --- | --- | --- |
 | `stop_id`, `mesh_block_code` | `string` | The pair. Together they are the grain. | |
 | `straight_line_distance_m` | `double` | Spherical distance from the stop to a point inside the mesh block. | Computed. |
-| `network_distance_m`, `network_duration_s` | `double` | Real walking distance along the street network. | Filled by a later routing pass; null until then. |
-| `routing_status` | `string` | `not_attempted`, `routed`, `unroutable` or `snap_failed`. | Says why a network distance is missing. |
+| `network_distance_m`, `network_duration_s` | `double` | Real walking distance and time along the street network. Null unless `routing_status` is `routed`. | A local OSRM server on an OpenStreetMap extract, foot profile. |
+| `routing_status` | `string` | `routed`, `snap_failed`, `unroutable`, or `not_attempted` for pairs deliberately skipped. | Says why a network distance is missing. |
+| `snap_distance_m` | `double` | How far the further of the two ends moved to reach the walking network. | Reported by the router. |
+| `detour_ratio` | `double` | Walking distance over straight-line distance. | Computed. |
 | `person_count`, `dwelling_count` | `integer` | Residents and dwellings of that mesh block. | Census mesh block counts. |
 | `mesh_block_category`, `sa1_code`, `area_sqkm` | | What kind of place it is, and how big. | ASGS and the counts. |
 
@@ -815,11 +817,32 @@ inside that distance, and so is any other radius, or a weighting that decays
 with distance. Precomputing a few fixed radii instead would answer only the
 questions someone thought of first.
 
-Two cautions. `straight_line_distance_m` is not a walk: across a harbour or
-a motorway the two diverge enormously, and they diverge unevenly between
-gridded inner suburbs and cul-de-sac outer ones, which is the direction of
-the project's headline comparison. And mesh block counts are perturbed by
-the ABS, so a block reporting nobody is not proof that nobody lives there.
+`straight_line_distance_m` is not a walk, and the gap is not uniform. Across
+a harbour or a motorway the two diverge enormously, and they diverge more in
+cul-de-sac outer suburbs than in the gridded inner ones. Measured here, the
+median detour is about 1.38 inner and about 1.45 outer, and restricting an
+800 m catchment to real walking distance retains around 54% of the
+straight-line population inner but only around 48% outer. Using straight-line
+distance therefore flatters outer suburbs, in the direction that would
+understate the project's headline comparison.
+
+Three cautions on the routed values. Only pairs with residents inside 800 m
+were routed, because a mesh block with nobody in it adds to no population
+figure and beyond 800 m nothing was asked; everything else reads
+`not_attempted`, which is not a failure. A pair that could not be routed
+stays null rather than falling back to the straight line, so a catchment
+missing people is countable instead of quietly mixing two different
+measurements. And mesh block counts are perturbed by the ABS, so a block
+reporting nobody is not proof that nobody lives there.
+
+A small share of pairs have a `detour_ratio` below 1.0, which is
+geometrically impossible. Both ends of a pair snap independently onto the
+walking network, so where the true distance is comparable to that
+displacement the measured walk can come out shorter than the straight line.
+The share falls away sharply with distance, from roughly two fifths of pairs
+under 50 m to about one in ninety at 300-400 m, and the shortfall is bounded
+by the snap distance, so it is a property of snapping rather than a defect
+and it changes no catchment.
 
 The mesh block is represented by a point guaranteed to lie inside it, not
 its centroid: a centroid of a block bent around a bay or a park can fall
