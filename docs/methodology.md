@@ -58,6 +58,7 @@ Friday's timetable is the one it runs on.
 | 11. Two alarms cry wolf by design | Expect a self-clearing alert on 4 October. |
 | 12. Unknown codes read as missing | Absent means "not sent or not recognised". |
 | 13. `lost_tracking` mixes two clocks | Checked, and it cannot change the answer. |
+| 14. The holiday list is hand-built | Checked against the timetable's own cancellations; nothing missing in range. |
 
 ---
 
@@ -149,6 +150,45 @@ That spread cannot change the answer, though. What decides the flag is
 whether the echoes that follow the last real observation are ordered after
 it, and they always are. Mixing the clocks changes how stale a value looks,
 never which value is last.
+
+### 14. The holiday list is transcribed by hand, and was checked
+
+Peak-hour comparisons are restricted to school-term weekdays, because
+holiday traffic and term traffic are different things. Which days those are
+comes from `dim_calendar_exclusion`, a list typed out once a year from
+published NSW calendars rather than pulled from a feed. The obvious failure
+is a forgotten public holiday: it would pass silently into the results as an
+ordinary weekday with strangely light traffic.
+
+The timetable can referee this. It records days on which a service does not
+run, so a public holiday shows up as a cluster of removals. Checked against
+the bundle published on 22 September 2026:
+
+- No date the list calls ordinary has an unusual number of removals. Nothing
+  is missing.
+- School-holiday weekdays carry roughly three times the removals of an
+  ordinary weekday.
+- Labour Day has more removals than any other day in the bundle - a public
+  holiday falling inside the school holidays.
+- The staff development day that opens term 4 barely registers, a little
+  above an ordinary weekday. It is excluded anyway, because student travel
+  is what the comparison measures, but it is the one entry the timetable
+  does not strongly support.
+- 29 December, a holiday for the NSW public service but not a general public
+  holiday, shows ordinary service. It is deliberately not on the list.
+
+Two limits on that check. The timetable only looks forward (section 8), so
+this bundle can only referee dates from late September onwards - the summer
+and autumn holidays and every public holiday before spring are unverified,
+and would need a bundle published earlier in the year. And the check finds
+missing exclusions, not spurious ones: a day wrongly marked as a holiday
+removes real data without leaving a trace of having done so.
+
+One entry deserves naming because a plausible source gets it wrong. NSW
+observes Easter Saturday as a full public holiday, and the Department of
+Education's machine-readable calendar omits it. Public holidays are
+therefore transcribed from the NSW government's own list, and only the
+school term dates come from the department's file.
 
 ---
 
