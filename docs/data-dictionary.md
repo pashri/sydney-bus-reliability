@@ -575,7 +575,21 @@ for the count and what it means for analysis.
 | `agency_id` | `string` | Which operator runs it. The bundle carries many. | Copied. |
 | `route_short_name` | `string` | The number on the front of the bus, e.g. `333`. | Copied. |
 | `route_long_name` | `string` | The longer descriptive name, where the bundle gives one. | Copied. |
-| `route_type` | `string` | The GTFS code for the mode of transport, e.g. `3` for bus. Kept as text, not converted to a number. Codes are listed in the [GTFS reference](https://gtfs.org/documentation/schedule/reference/#routestxt). | Copied verbatim. |
+| `route_type` | `string` | The GTFS code for the kind of service. Kept as text, not converted to a number. Transport for NSW uses the **extended** codes, not the basic ones, so the bus code here is `700` and not `3`. See the table below. | Copied verbatim. |
+
+The extended codes are defined in [Google's extended route types](https://developers.google.com/transit/gtfs/reference/extended-route-types); the basic codes in the [GTFS reference](https://gtfs.org/documentation/schedule/reference/#routestxt) apply only to `4`. Four values appear in the bundle:
+
+| Code | Means | Notes for analysis |
+| --- | --- | --- |
+| `712` | School bus | The large majority of routes. They run only on term weekdays, at the edges of the peaks, often a couple of trips a day. Counting them alongside all-day routes inflates route counts and mixes two different kinds of service. |
+| `700` | Bus service | Ordinary all-day routes. This is the population most reliability questions are about. |
+| `714` | Rail replacement bus | A few dozen routes. They run only during trackwork, on no regular pattern, so their headways and punctuality do not describe normal operations. |
+| `4` | Ferry | A single row. The bundle is almost, but not quite, all buses. |
+
+`route_type` is the operator's own statement about a route, which makes it
+a better filter than route names. Some school runs name the school without
+using the word - `Balgowlah Boys High` - and some all-year public routes
+terminate at a school and are not school services at all.
 
 Two operators can run the same route number under different `route_id`s,
 which is why one unmatched id in the live feed is genuinely unresolvable.
