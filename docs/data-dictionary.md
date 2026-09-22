@@ -36,6 +36,7 @@ describes shape; that one describes trust.
   - [`dim_shape`](#dim_shape)
   - [`dim_calendar`](#dim_calendar)
   - [`dim_calendar_dates`](#dim_calendar_dates)
+  - [`dim_calendar_exclusion`](#dim_calendar_exclusion)
 - [Audit tables](#audit-tables)
   - [`collector_run`](#collector_run)
   - [`curation_run`](#curation_run)
@@ -671,6 +672,40 @@ date on which service is added or removed, such as a public holiday. From
 | `service_id` | `string` | Which pattern this exception applies to. Joins to `dim_calendar` and `dim_trip`. | Copied from `calendar_dates.txt`. |
 | `date` | `string` | The day the exception applies to, `YYYYMMDD`, Sydney local. | Copied verbatim. |
 | `exception_type` | `string` | `1` means service runs on this date even though the weekly pattern says otherwise. `2` means it does not run. Kept as text. | Copied verbatim. |
+
+### `dim_calendar_exclusion`
+
+**One row is one calendar date carrying one reason it is not an ordinary
+school-term day.** Unlike every other table here, this one is not derived
+from a feed: it is hand-built once a year from published NSW calendars,
+committed as `analysis/calendar_exclusions_<year>.csv`, and expanded from
+date ranges into individual dates by `analysis/calendar_exclusion.py`.
+
+It exists so that peak-hour comparisons can be restricted to term time.
+School holidays change traffic and patronage enough that including them
+alongside term weekdays compares two different things.
+
+| Column | Type | What it means | Where it comes from |
+| --- | --- | --- | --- |
+| `date` | `date` | The excluded day, Sydney local. | Expanded from the seed row's `start_date`/`end_date`, which are inclusive of both endpoints. |
+| `exclusion_type` | `string` | `public_holiday`, `school_holiday`, or `school_development_day`. | Copied from the seed. |
+| `reason` | `string` | The event's published name, such as `Spring holidays`. | Copied from the seed. |
+| `source` | `string` | URL the date was transcribed from. | Copied from the seed. |
+
+A date can appear more than once, so the grain is `(date, exclusion_type)`
+and never `date` alone. Labour Day falls inside the spring holidays and
+carries a row of each kind; joining on `date` without deduplicating will
+double-count that day's traffic.
+
+The public holiday rows are transcribed by hand. The data.gov.au holidays
+dataset is marked inactive and stops before this project's data begins, and
+the current NSW source publishes PDFs and an `.ics` rather than a CSV. The
+school dates come from the Department of Education's machine-readable
+outlook calendar, which omits Easter Saturday even though NSW observes it.
+
+To check a year's public holidays, look for clusters of
+`dim_calendar_dates.exception_type = 2` on dates this table calls ordinary.
+A mass service removal on an unexcluded date means a missed holiday.
 
 ---
 

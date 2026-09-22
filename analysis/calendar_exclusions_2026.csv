@@ -1,0 +1,23 @@
+start_date,end_date,exclusion_type,reason,source
+2026-01-01,2026-01-01,public_holiday,New Year's Day,https://www.nsw.gov.au/about-nsw/public-holidays
+2026-01-26,2026-01-26,public_holiday,Australia Day,https://www.nsw.gov.au/about-nsw/public-holidays
+2026-04-03,2026-04-03,public_holiday,Good Friday,https://www.nsw.gov.au/about-nsw/public-holidays
+2026-04-04,2026-04-04,public_holiday,Easter Saturday,https://www.nsw.gov.au/about-nsw/public-holidays
+2026-04-05,2026-04-05,public_holiday,Easter Sunday,https://www.nsw.gov.au/about-nsw/public-holidays
+2026-04-06,2026-04-06,public_holiday,Easter Monday,https://www.nsw.gov.au/about-nsw/public-holidays
+2026-04-25,2026-04-25,public_holiday,Anzac Day,https://www.nsw.gov.au/about-nsw/public-holidays
+2026-06-08,2026-06-08,public_holiday,King's Birthday,https://www.nsw.gov.au/about-nsw/public-holidays
+2026-10-05,2026-10-05,public_holiday,Labour Day,https://www.nsw.gov.au/about-nsw/public-holidays
+2026-12-25,2026-12-25,public_holiday,Christmas Day,https://www.nsw.gov.au/about-nsw/public-holidays
+2026-12-26,2026-12-26,public_holiday,Boxing Day,https://www.nsw.gov.au/about-nsw/public-holidays
+2026-12-28,2026-12-28,public_holiday,Additional day for Boxing Day,https://www.nsw.gov.au/about-nsw/public-holidays
+2026-01-01,2026-01-26,school_holiday,Summer holidays before Term 1,https://education.nsw.gov.au/schooling/calendars/2026
+2026-04-07,2026-04-17,school_holiday,Autumn holidays,https://education.nsw.gov.au/schooling/calendars/2026
+2026-07-06,2026-07-17,school_holiday,Winter holidays,https://education.nsw.gov.au/schooling/calendars/2026
+2026-09-28,2026-10-09,school_holiday,Spring holidays,https://education.nsw.gov.au/schooling/calendars/2026
+2026-12-18,2026-12-31,school_holiday,Summer holidays after Term 4,https://education.nsw.gov.au/schooling/calendars/2026
+2026-01-27,2026-01-30,school_development_day,Staff development days (eastern division),https://education.nsw.gov.au/schooling/calendars/2026
+2026-02-03,2026-02-06,school_development_day,Staff development days (western division),https://education.nsw.gov.au/schooling/calendars/2026
+2026-04-20,2026-04-21,school_development_day,Staff development days,https://education.nsw.gov.au/schooling/calendars/2026
+2026-07-20,2026-07-20,school_development_day,Staff development day,https://education.nsw.gov.au/schooling/calendars/2026
+2026-10-12,2026-10-12,school_development_day,Staff development day,https://education.nsw.gov.au/schooling/calendars/2026
