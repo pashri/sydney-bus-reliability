@@ -33,13 +33,21 @@ MANIFEST_NAME: Final[str] = 'manifest.json'
 
 
 class ReferenceTable(StrEnum):
-    """A table published under the reference prefix."""
+    """A table published under the reference prefix.
+
+    The name carries the geographic grain where the table has one.
+    Every other census table is at SA1, but the Working Population
+    Profile is not published that finely: SA2 is the finest available,
+    and an SA2 is large enough that treating its figures as if they
+    described a walking catchment would be wrong. The name is the
+    warning.
+    """
 
     STOP_GEOGRAPHY = 'stop_geography'
     STOP_MESHBLOCK = 'stop_meshblock'
     CENSUS_SA1 = 'census_sa1'
     CENSUS_SA1_COLUMNS = 'census_sa1_columns'
-    WPP_SA1 = 'wpp_sa1'
+    WPP_SA2 = 'wpp_sa2'
     STATION = 'station'
     STOP_INTERCHANGE = 'stop_interchange'
     BUS_PRIORITY = 'bus_priority'

@@ -618,6 +618,18 @@ See [methodology 9](methodology.md#9-identifiers-that-dont-match-are-recorded-no
 | `stop_name` | `string` | The name printed on the timetable, including the street and stand where the bundle gives them. | Copied. |
 | `stop_lat` | `double` | Latitude, decimal degrees, WGS 84. | Parsed from text. Null when the bundle left the field blank. |
 | `stop_lon` | `double` | Longitude, decimal degrees, WGS 84. | Parsed from text. Null when the bundle left the field blank. |
+| `wheelchair_boarding` | `string` | Whether the stop is accessible: `1` means at least some vehicles can be boarded by a wheelchair user, `2` means not. Kept as text. | Copied. Null when the field is blank or the column is absent. |
+
+`wheelchair_boarding` has no third code for "unknown". GTFS uses `0` or a
+blank for that, and both arrive here as null, so a null means the bundle
+said nothing rather than that the stop is inaccessible. Counting nulls as
+inaccessible would overstate the problem considerably.
+
+The column was added after collection began, so snapshots written before
+it exists do not carry it. Reading across those snapshots needs
+`union_by_name=true`; without it, selecting the column fails with a schema
+mismatch rather than returning nulls for the older files. Counting rows
+works either way, which is what makes this easy to miss.
 
 These coordinates are how "Sydney" is defined at analysis time. The feeds do
 not hand you a Sydney filter; you apply one. See

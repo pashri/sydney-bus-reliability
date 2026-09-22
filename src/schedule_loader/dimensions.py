@@ -75,13 +75,16 @@ def stop_record(*, row: Row) -> Record:
     Returns
     -------
     Record
-        Stop identity and location.
+        Stop identity, location and accessibility.
     """
     return {
         'stop_id': row['stop_id'],
         'stop_name': row['stop_name'],
         'stop_lat': optional_float(value=row['stop_lat']),
         'stop_lon': optional_float(value=row['stop_lon']),
+        'wheelchair_boarding': (
+            row.get('wheelchair_boarding') or None
+        ),
     }
 
 
@@ -244,6 +247,7 @@ STOP_FIELDS: Final[list[pa.Field[Any]]] = [
     pa.field('stop_name', pa.string()),
     pa.field('stop_lat', pa.float64()),
     pa.field('stop_lon', pa.float64()),
+    pa.field('wheelchair_boarding', pa.string()),
 ]
 STOP_SCHEMA: Final[pa.Schema] = pa.schema(STOP_FIELDS)
 ROUTE_SCHEMA: Final[pa.Schema] = pa.schema([

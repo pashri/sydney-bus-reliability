@@ -8,9 +8,14 @@ import pytest
 from schedule_loader.dimensions import SPECS, Dimension, dimension_batches
 
 STOPS: str = (
+    'stop_id,stop_name,stop_lat,stop_lon,location_type,parent_station,'
+    'wheelchair_boarding\n'
+    '"200013","Alpha St","-33.8","151.2","","","1"\n'
+    '"2000100","Beta Rd","-33.9","150.9","","",""\n'
+)
+STOPS_WITHOUT_ACCESSIBILITY: str = (
     'stop_id,stop_name,stop_lat,stop_lon,location_type,parent_station\n'
     '"200013","Alpha St","-33.8","151.2","",""\n'
-    '"2000100","Beta Rd","-33.9","150.9","",""\n'
 )
 ROUTES: str = (
     'route_id,agency_id,route_short_name,route_long_name,route_type\n'
@@ -77,6 +82,26 @@ def test_stop_rows_parse_coordinates_as_floats() -> None:
         archive=archive, dimension=Dimension.STOP, batch_size=10,
     ))
     assert batch.column('stop_lat').to_pylist() == [-33.8, -33.9]
+
+
+def test_stop_rows_carry_wheelchair_boarding() -> None:
+    """Accessibility is kept as the feed's code, blank becoming null."""
+    archive = build_zip(members={'stops.txt': STOPS})
+    batch = next(dimension_batches(
+        archive=archive, dimension=Dimension.STOP, batch_size=10,
+    ))
+    assert batch.column('wheelchair_boarding').to_pylist() == ['1', None]
+
+
+def test_stop_rows_tolerate_no_accessibility_column() -> None:
+    """A bundle omitting the optional column still loads."""
+    archive = build_zip(
+        members={'stops.txt': STOPS_WITHOUT_ACCESSIBILITY},
+    )
+    batch = next(dimension_batches(
+        archive=archive, dimension=Dimension.STOP, batch_size=10,
+    ))
+    assert batch.column('wheelchair_boarding').to_pylist() == [None]
 
 
 def test_route_rows_carry_short_and_long_names() -> None:
