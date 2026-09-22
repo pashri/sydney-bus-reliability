@@ -141,3 +141,12 @@ def test_longitude_and_latitude_are_not_swapped(
         "where stop_id = 'inside'",
     ).fetchone()
     assert row == (151.205, -33.870)
+
+
+def test_unmatched_stop_view_holds_only_unmatched_stops(
+    con: duckdb.DuckDBPyConnection,
+) -> None:
+    rows = con.execute(
+        'select stop_id from unmatched_stop order by stop_id',
+    ).fetchall()
+    assert rows == [('outside',)]

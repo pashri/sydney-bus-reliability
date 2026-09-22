@@ -80,13 +80,21 @@ join lga
     on st_intersects(lga.geom, stop.geom)
 group by stop.stop_id;
 
--- Stops that fell inside nothing, with the nearest mesh block and how
--- far away it is.
+-- Stops that fell inside nothing.
 --
 -- These are real: a stop on a wharf, a coordinate typo, a stop just
 -- outside the clipped extent. Left as a silent null they become an
 -- unexamined hole in every geographic comparison, so they are kept,
 -- measured, and labelled.
+--
+-- They are isolated here, before any distance is measured. Filtering
+-- after the join instead ranks every polygon against every stop, which
+-- is billions of comparisons to answer a question about a handful.
+create or replace view unmatched_stop as
+select stop.*
+from stop_point as stop
+where stop.stop_id not in (select stop_id from stop_mesh_block);
+
 -- Ranking uses planar distance in degrees, which is anisotropic but
 -- picks the same nearest polygon at these latitudes. The distance
 -- reported is spherical, in metres, measured to the closest point on
@@ -108,7 +116,7 @@ select
         st_point(st_y(nearest.closest), st_x(nearest.closest)),
         st_point(stop.stop_lat, stop.stop_lon)
     ) as distance_m
-from stop_point as stop
+from unmatched_stop as stop
 cross join lateral (
     select
         mb.mesh_block_code,
@@ -125,5 +133,4 @@ cross join lateral (
     from mesh_block as mb
     order by st_distance(mb.geom, stop.geom)
     limit 1
-) as nearest
-where stop.stop_id not in (select stop_id from stop_mesh_block);
+) as nearest;

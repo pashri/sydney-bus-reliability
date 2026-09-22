@@ -12,3 +12,8 @@ requirements.txt
 *.pb
 *.zip
 
+
+# Large downloaded source data for the offline reference build
+source/
+build/
+*.osm.pbf
