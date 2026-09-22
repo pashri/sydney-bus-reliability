@@ -1,0 +1,13 @@
+centre_id,centre_name,tier,latitude,longitude,source
+sydney,Sydney CBD,primary,-33.8732,151.2065,Town Hall Station
+parramatta,Parramatta,strategic,-33.8150,151.0011,Parramatta Station
+newcastle,Newcastle,regional,-32.9272,151.7761,Newcastle Interchange
+wollongong,Wollongong,regional,-34.4248,150.8931,Wollongong Station
+gosford,Gosford,regional,-33.4269,151.3417,Gosford Station
+liverpool,Liverpool,strategic,-33.9203,150.9235,Liverpool Station
+penrith,Penrith,strategic,-33.7507,150.6944,Penrith Station
+chatswood,Chatswood,strategic,-33.7969,151.1803,Chatswood Station
+blacktown,Blacktown,strategic,-33.7688,150.9063,Blacktown Station
+campbelltown,Campbelltown,strategic,-34.0640,150.8144,Campbelltown Station
+bankstown,Bankstown,strategic,-33.9179,151.0350,Bankstown Station
+hornsby,Hornsby,strategic,-33.7024,151.0990,Hornsby Station
