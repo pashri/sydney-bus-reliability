@@ -14,13 +14,12 @@ result can be looked at before it replaces what analyses read.
 
 import argparse
 import logging
-from datetime import date
 from pathlib import Path
 from typing import Final
 
-import boto3
 import duckdb
 
+from analysis.reference.publishing import add_publish_arguments, upload
 from analysis.reference.vintage import ReferenceTable, vintage_prefix
 
 MERGE_SQL: Final[Path] = (
@@ -104,31 +103,6 @@ def write(*, con: duckdb.DuckDBPyConnection, path: Path) -> None:
     logger.info('wrote %s', path)
 
 
-def upload(
-    *,
-    path: Path,
-    bucket: str,
-    key: str,
-    profile: str | None = None,
-) -> None:
-    """Put the merged bridge in its published place.
-
-    Parameters
-    ----------
-    path : Path
-        Local file to upload.
-    bucket : str
-        Destination bucket.
-    key : str
-        Destination key.
-    profile : str | None, optional
-        Named AWS profile with write access.
-    """
-    session = boto3.Session(profile_name=profile)
-    session.client('s3').upload_file(str(path), bucket, key)
-    logger.info('published s3://%s/%s', bucket, key)
-
-
 def main(*, argv: list[str] | None = None) -> int:
     """Merge and optionally publish.
 
@@ -180,11 +154,7 @@ def parse_args(*, argv: list[str] | None = None) -> argparse.Namespace:
         '--output', type=Path,
         default=Path('build/reference/stop_meshblock_routed.parquet'),
     )
-    parser.add_argument('--vintage', type=date.fromisoformat,
-                        default=date.today())
-    parser.add_argument('--bucket', default=None)
-    parser.add_argument('--profile', default=None)
-    parser.add_argument('--publish', action='store_true')
+    add_publish_arguments(parser=parser)
     return parser.parse_args(argv)
 
 

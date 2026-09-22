@@ -23,9 +23,9 @@ from datetime import date
 from pathlib import Path
 from typing import Final
 
-import boto3
 import duckdb
 
+from analysis.reference.publishing import add_publish_arguments, upload
 from analysis.reference.vintage import ReferenceTable, vintage_prefix
 
 SQL_DIR: Final[Path] = Path(__file__).parents[1] / 'analysis' / 'reference'
@@ -288,35 +288,6 @@ def write_outputs(
             )
 
 
-def upload(
-    *,
-    path: Path,
-    bucket: str,
-    key: str,
-    profile: str | None = None,
-) -> None:
-    """Put one built file in its published place.
-
-    A single object needs no staging prefix: the put either completes
-    or leaves nothing, so a reader taking the latest vintage cannot
-    find a half-written one.
-
-    Parameters
-    ----------
-    path : Path
-        Local file to upload.
-    bucket : str
-        Destination bucket.
-    key : str
-        Destination key.
-    profile : str | None, optional
-        Named AWS profile. Writing needs one with write access.
-    """
-    session = boto3.Session(profile_name=profile)
-    session.client('s3').upload_file(str(path), bucket, key)
-    logger.info('published s3://%s/%s', bucket, key)
-
-
 def parse_args(*, argv: list[str] | None = None) -> argparse.Namespace:
     """Read the command line.
 
@@ -338,11 +309,7 @@ def parse_args(*, argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument('--mesh-block-counts-xlsx', type=Path, required=True)
     parser.add_argument('--output-dir', type=Path,
                         default=Path('build/reference'))
-    parser.add_argument('--vintage', type=date.fromisoformat,
-                        default=date.today())
-    parser.add_argument('--bucket', default=None)
-    parser.add_argument('--profile', default=None)
-    parser.add_argument('--publish', action='store_true')
+    add_publish_arguments(parser=parser)
     return parser.parse_args(argv)
 
 
