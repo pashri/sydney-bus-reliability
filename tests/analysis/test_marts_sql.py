@@ -93,3 +93,49 @@ def test_school_trip_follows_its_route(
 ) -> None:
     rows = con.execute('select trip_id from school_trip').fetchall()
     assert rows == [('t1',)]
+
+
+def test_seed_holds_every_nsw_public_holiday(
+    con: duckdb.DuckDBPyConnection,
+) -> None:
+    rows = con.execute(
+        'select day from calendar_exclusion '
+        "where exclusion_type = 'public_holiday' order by day",
+    ).fetchall()
+    assert [row[0] for row in rows] == [
+        date(2026, 1, 1),
+        date(2026, 1, 26),
+        date(2026, 4, 3),
+        date(2026, 4, 4),
+        date(2026, 4, 5),
+        date(2026, 4, 6),
+        date(2026, 4, 25),
+        date(2026, 6, 8),
+        date(2026, 10, 5),
+        date(2026, 12, 25),
+        date(2026, 12, 26),
+        date(2026, 12, 28),
+    ]
+
+
+def test_exclusions_stay_within_the_year(
+    con: duckdb.DuckDBPyConnection,
+) -> None:
+    rows = con.execute(
+        'select min(day), max(day) from calendar_exclusion',
+    ).fetchone()
+    assert rows == (date(2026, 1, 1), date(2026, 12, 31))
+
+
+def test_every_exclusion_type_is_recognised(
+    con: duckdb.DuckDBPyConnection,
+) -> None:
+    rows = con.execute(
+        'select distinct exclusion_type from calendar_exclusion '
+        'order by exclusion_type',
+    ).fetchall()
+    assert [row[0] for row in rows] == [
+        'public_holiday',
+        'school_development_day',
+        'school_holiday',
+    ]
