@@ -30,8 +30,66 @@ def _con() -> duckdb.DuckDBPyConnection:
         "('t1', 'r_school'), ('t2', 'r_bus'), ('t3', 'r_named')"
         ') as t(trip_id, route_id)',
     )
+    con.execute('INSTALL spatial; LOAD spatial;')
+    con.execute(
+        'create table stop_geography_all as select * from (values '
+        "('s1', -33.87, 151.20, DATE '2026-01-01'), "
+        "('s1', -33.87, 151.20, DATE '2026-09-22'), "
+        "('s2', -33.90, 151.10, DATE '2026-09-22')"
+        ') as t(stop_id, stop_lat, stop_lon, vintage)',
+    )
+    con.execute(
+        'create table stop_meshblock_all as select * from (values '
+        "('s1', '10001', 100.0, 50, DATE '2026-01-01'), "
+        "('s1', '10001', 100.0, 50, DATE '2026-09-22')"
+        ') as t(stop_id, mesh_block_code, straight_line_distance_m, '
+        'person_count, vintage)',
+    )
+    con.execute(
+        'create table dim_stop as select * from (values '
+        "('s1', -33.87, 151.20), "
+        "('s2', -33.95, 151.10)"
+        ') as t(stop_id, stop_lat, stop_lon)',
+    )
     con.execute(MARTS.read_text(encoding='utf-8'))
     return con
+
+
+def test_reference_views_take_the_latest_vintage(
+    con: duckdb.DuckDBPyConnection,
+) -> None:
+    rows = con.execute(
+        'select distinct vintage from stop_geography',
+    ).fetchall()
+    assert rows == [(date(2026, 9, 22),)]
+
+
+def test_reference_views_keep_every_row_of_that_vintage(
+    con: duckdb.DuckDBPyConnection,
+) -> None:
+    rows = con.execute('select count(*) from stop_geography').fetchone()
+    assert rows == (2,)
+
+
+def test_an_unmoved_stop_is_not_stale(
+    con: duckdb.DuckDBPyConnection,
+) -> None:
+    rows = con.execute(
+        "select stop_id from stop_geography_stale where stop_id = 's1'",
+    ).fetchall()
+    assert rows == []
+
+
+def test_a_moved_stop_is_flagged_stale(
+    con: duckdb.DuckDBPyConnection,
+) -> None:
+    row = con.execute(
+        'select stop_id, round(moved_m) from stop_geography_stale '
+        "where stop_id = 's2'",
+    ).fetchone()
+    assert row is not None
+    assert row[0] == 's2'
+    assert row[1] > 25
 
 
 def test_calendar_exclusion_expands_ranges(

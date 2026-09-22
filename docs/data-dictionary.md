@@ -37,6 +37,9 @@ describes shape; that one describes trust.
   - [`dim_calendar`](#dim_calendar)
   - [`dim_calendar_dates`](#dim_calendar_dates)
   - [`dim_calendar_exclusion`](#dim_calendar_exclusion)
+- [Reference tables](#reference-tables)
+  - [`stop_geography`](#stop_geography)
+  - [`stop_meshblock`](#stop_meshblock)
 - [Audit tables](#audit-tables)
   - [`collector_run`](#collector_run)
   - [`curation_run`](#curation_run)
@@ -732,6 +735,96 @@ outlook calendar, which omits Easter Saturday even though NSW observes it.
 To check a year's public holidays, look for clusters of
 `dim_calendar_dates.exception_type = 2` on dates this table calls ordinary.
 A mass service removal on an unexcluded date means a missed holiday.
+
+---
+
+## Reference tables
+
+These describe the places stops are in, rather than anything the buses did.
+They are built once from published ABS and OpenStreetMap files, on a laptop
+rather than in the pipeline, and written under `reference/` so what a
+scheduled job produces stays separable from what a person produced.
+
+They are versioned differently from everything else. A fact row joins to the
+timetable that applied on its own service day, but the newest boundaries
+describe a place better for every day, including days already collected. So
+**the latest vintage wins outright** and there is no point-in-time join. The
+partition is the date the build ran; which ABS editions went into it are
+columns, because a build can pair 2021 boundaries with a later SEIFA and the
+path should not imply the two move together.
+
+Field definitions for the census and SEIFA columns are the ABS's own:
+the [SEIFA 2021 release](https://www.abs.gov.au/statistics/people/people-and-communities/socio-economic-indexes-areas-seifa-australia/latest-release),
+the [ASGS Edition 3](https://www.abs.gov.au/statistics/standards/australian-statistical-geography-standard-asgs-edition-3/jul2021-jun2026)
+and the [Census DataPacks](https://www.abs.gov.au/census/find-census-data/datapacks).
+
+### `stop_geography`
+
+**One row is one stop, and where it sits.** At
+`reference/stop_geography/vintage=YYYY-MM-DD/`.
+
+| Column | Type | What it means | Where it comes from |
+| --- | --- | --- | --- |
+| `stop_id` | `string` | Joins to `dim_stop`. | Copied. |
+| `stop_lat`, `stop_lon` | `double` | The coordinates the geography was computed from, not a convenience copy. | From `dim_stop` at build time. |
+| `mesh_block_code` | `string` | ABS mesh block, 11 digits. Text, because some begin with a zero. | Point-in-polygon against ASGS. |
+| `mesh_block_category` | `string` | `Residential`, `Commercial`, `Parkland`, `Industrial` and so on. | Census mesh block counts. |
+| `sa1_code` to `gccsa_name` | `string` | The statistical hierarchy above the mesh block. | Attributes of the mesh block. |
+| `lga_code`, `lga_name` | `string` | Local government area. | A separate point-in-polygon; LGA is not a mesh block attribute. |
+| `geography_match` | `string` | `inside` when the stop fell within a mesh block, `nearest` when it did not. | How the assignment was made. |
+| `geography_match_distance_m` | `double` | Zero when `inside`; the distance to the polygon when `nearest`. | Spherical distance. |
+| `boundary_tie` | `boolean` | True when the stop sits exactly on a shared edge and matched more than one block. | Count of matches. |
+| `irsd_score`, `irsd_national_decile`, `irsd_state_decile` | `double`, `smallint` | Relative socio-economic disadvantage. Deciles both ways: against Australia, and against NSW alone. | SEIFA 2021 at SA1. |
+| `irsad_*`, `ier_*`, `ieo_*` | | The other three SEIFA indexes, same shape. | SEIFA 2021 at SA1. |
+| `sa1_usual_resident_population` | `integer` | Residents of the stop's SA1. | SEIFA. |
+| `seifa_irsd_excluded` | `boolean` | True when the ABS explicitly excluded this area from the index. | SEIFA excluded areas table. |
+| `distance_to_cbd_m` | `double` | Straight-line distance to the Sydney CBD. | Spherical distance to a committed point. |
+| `nearest_centre_id`, `nearest_centre_name`, `distance_to_nearest_centre_m` | | The closest major centre, named. | A committed list of centres. |
+| `vintage`, `asgs_edition`, `seifa_release`, `census_year` | | Which build, and from which editions. | Recorded at build time. |
+
+A small share of stops carry **no SEIFA score at all**. That is not missing
+data: the ABS excludes areas with essentially no residents, and those stops
+are in industrial estates, showgrounds and cemeteries. `mesh_block_category`
+says which. Borrowing a surrounding suburb's score would attribute a
+characteristic of residents to a place that has none, so the score is left
+null.
+
+Distance to the Sydney CBD describes a monocentric city, which Sydney is
+not. `distance_to_nearest_centre_m` exists because a Parramatta stop is not
+peripheral merely because Martin Place is far away, and for a Newcastle stop
+the distance to Sydney says nothing worth knowing.
+
+### `stop_meshblock`
+
+**One row is one stop and one mesh block near it.** At
+`reference/stop_meshblock/vintage=YYYY-MM-DD/`. Every mesh block whose
+interior point lies within 1600 m of the stop.
+
+| Column | Type | What it means | Where it comes from |
+| --- | --- | --- | --- |
+| `stop_id`, `mesh_block_code` | `string` | The pair. Together they are the grain. | |
+| `straight_line_distance_m` | `double` | Spherical distance from the stop to a point inside the mesh block. | Computed. |
+| `network_distance_m`, `network_duration_s` | `double` | Real walking distance along the street network. | Filled by a later routing pass; null until then. |
+| `routing_status` | `string` | `not_attempted`, `routed`, `unroutable` or `snap_failed`. | Says why a network distance is missing. |
+| `person_count`, `dwelling_count` | `integer` | Residents and dwellings of that mesh block. | Census mesh block counts. |
+| `mesh_block_category`, `sa1_code`, `area_sqkm` | | What kind of place it is, and how big. | ASGS and the counts. |
+
+This table exists so that **catchment population is a query, not a column**.
+"How many people live within 800 m of this stop" is a sum over the rows
+inside that distance, and so is any other radius, or a weighting that decays
+with distance. Precomputing a few fixed radii instead would answer only the
+questions someone thought of first.
+
+Two cautions. `straight_line_distance_m` is not a walk: across a harbour or
+a motorway the two diverge enormously, and they diverge unevenly between
+gridded inner suburbs and cul-de-sac outer ones, which is the direction of
+the project's headline comparison. And mesh block counts are perturbed by
+the ABS, so a block reporting nobody is not proof that nobody lives there.
+
+The mesh block is represented by a point guaranteed to lie inside it, not
+its centroid: a centroid of a block bent around a bay or a park can fall
+outside the block entirely, and routing from the wrong block returns a
+confident wrong answer.
 
 ---
 

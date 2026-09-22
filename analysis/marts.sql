@@ -67,3 +67,53 @@ create or replace view school_trip as
 select trip.trip_id
 from dim_trip as trip
 where trip.route_id in (select route_id from school_route);
+
+-- The current vintage of each reference table.
+--
+-- Create these inputs first, over the reference prefix:
+--
+--   stop_geography_all  reference/stop_geography/*/*.parquet
+--   stop_meshblock_all  reference/stop_meshblock/*/*.parquet
+--
+-- Reference data is not joined point in time, unlike the timetable. A
+-- fact row belongs to the timetable that applied on its service day,
+-- but the newest boundaries and census are the best description of a
+-- place for every day, including days already collected. So the
+-- latest vintage wins outright.
+--
+-- The filter reads the vintage column inside the files rather than the
+-- partition value in the path. The two are written together and agree,
+-- but only one of them survives being copied somewhere else.
+create or replace view stop_geography as
+select *
+from stop_geography_all
+where vintage = (select max(vintage) from stop_geography_all);
+
+create or replace view stop_meshblock as
+select *
+from stop_meshblock_all
+where vintage = (select max(vintage) from stop_meshblock_all);
+
+-- Stops whose coordinates have moved since the geography was built.
+--
+-- A stop that moves keeps its old suburb, disadvantage score and
+-- catchment until someone rebuilds. Nothing about the stale row looks
+-- wrong, so the check has to be made deliberately.
+create or replace view stop_geography_stale as
+select
+    current.stop_id,
+    built.stop_lat as built_lat,
+    built.stop_lon as built_lon,
+    current.stop_lat,
+    current.stop_lon,
+    st_distance_sphere(
+        st_point(built.stop_lat, built.stop_lon),
+        st_point(current.stop_lat, current.stop_lon)
+    ) as moved_m
+from dim_stop as current
+left join stop_geography as built on built.stop_id = current.stop_id
+where built.stop_id is null
+   or st_distance_sphere(
+        st_point(built.stop_lat, built.stop_lon),
+        st_point(current.stop_lat, current.stop_lon)
+      ) > 25;
