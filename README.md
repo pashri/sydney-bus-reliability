@@ -72,6 +72,21 @@ layer step, and nothing to build by hand on a fresh clone.
 
     uv run pytest
 
+## Replaying from raw
+
+A fix to the compactor or merger only reaches past days by rebuilding them
+from `raw/`, which is kept for 30 days:
+
+    PYTHONPATH=src uv run python -m scripts.replay \
+      --from 2026-09-17 --to 2026-09-22 \
+      --profile pashri-admin --log replay.jsonl
+
+It compacts every raw hour the chosen service days read, three at a time,
+then merges each day, through the deployed Lambdas. `--to` defaults to the
+latest day whose merge window has closed. With `--log`, a rerun skips the
+steps already finished. Merge within 3 days of compacting, before the
+partials expire.
+
 ## Re-running a merge
 
 The merger takes two optional event keys, both for re-runs. The scheduled
