@@ -14,6 +14,7 @@ from scripts.replay import (
     hours_to_compact,
     last_complete_day,
     parse_raw_hour,
+    run_steps,
 )
 
 
@@ -91,3 +92,37 @@ def test_hours_to_compact_rejects_an_open_day(first: date) -> None:
         hours_to_compact(
             available=set(), first=first, last=first, now=end,
         )
+
+
+def test_replay_log_forgets_compaction_older_than_its_partials(
+    tmp_path: Path,
+) -> None:
+    """A compaction whose partials may have expired is done again."""
+    path = tmp_path / 'replay.jsonl'
+    old = datetime(2026, 9, 20, tzinfo=UTC)
+    path.write_text(''.join(
+        json.dumps({'step': step, 'finished_at_utc': old.isoformat()}) + '\n'
+        for step in ('compact 2026-09-16T16', 'merge 2026-09-17')
+    ))
+    assert ReplayLog(path=path).done(
+        now=old + timedelta(days=3),
+    ) == {'merge 2026-09-17'}
+
+
+def test_run_steps_reports_an_invocation_error_as_a_failure(
+    tmp_path: Path,
+) -> None:
+    """An error raised while invoking fails that step, not the run."""
+    def invoke(event: dict[str, object]) -> str | None:
+        if event['hour'] == 'bad':
+            raise ConnectionResetError('reset by peer')
+        return None
+
+    log = ReplayLog(path=tmp_path / 'replay.jsonl')
+    failures = run_steps(
+        steps=[('compact bad', {'hour': 'bad'}),
+               ('compact good', {'hour': 'good'})],
+        invoke=invoke, log=log, parallel=1,
+    )
+    assert failures == 1
+    assert log.done() == {'compact good'}
