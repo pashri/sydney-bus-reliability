@@ -36,7 +36,7 @@ AWS SAM: five Lambdas, two layers and one S3 bucket.
   while running as late as 06:00 the next morning, so the window it reads
   closes at 07:00 and it has to run after that
 - `schedule_loader`, 12:00 Australia/Sydney. Fetches the static GTFS bundle
-  and writes a new `valid_from` snapshot of the seven dimensions only when
+  and writes a new `valid_from` snapshot of the eight dimensions, and archives the zip itself, only when
   the bundle's content hash changes, since the bundle is forward-looking
   and a missed day's timetable cannot be recovered later
 - `checker`, on demand only. Reads the curated layer and reports the

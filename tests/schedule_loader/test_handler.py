@@ -14,6 +14,7 @@ import responses
 from common.gtfs_static import StaticBundle
 from common.parquet import ParquetRepository
 from schedule_loader.handler import (
+    archive_bundle,
     fetch_bundle,
     handler,
     latest_sha256,
@@ -52,6 +53,11 @@ def build_bundle(*, extra: str = '') -> bytes:
         Zip archive bytes.
     """
     members = {
+        'agency.txt': (
+            'agency_id,agency_name,agency_url,agency_timezone\n'
+            '"2447","Port Stephens Coaches","http://transportnsw.info",'
+            '"Australia/Sydney"\n'
+        ),
         'stops.txt': (
             'stop_id,stop_name,stop_lat,stop_lon\n'
             '"200013","Alpha St","-33.8","151.2"\n'
@@ -230,6 +236,7 @@ def test_write_dimensions_writes_every_dimension(_bucket: str) -> None:
         bundle=bundle, repository=repository, valid_from='2026-09-19',
     )
     assert written == {
+        'dim_agency': 1,
         'dim_stop': 1,
         'dim_route': 1,
         'dim_trip': 1,
@@ -319,3 +326,91 @@ def test_handler_changed_bundle_writes_second_snapshot(
     handler({}, _Context())
     second = handler({}, _Context())
     assert second['changed']
+
+
+def bundle_keys(*, bucket: str) -> list[str]:
+    """List every archived bundle key.
+
+    Parameters
+    ----------
+    bucket : str
+        Bucket to list.
+
+    Returns
+    -------
+    list[str]
+        Keys under the bundle archive prefix.
+    """
+    listed = boto3.client('s3').list_objects_v2(
+        Bucket=bucket, Prefix='curated/schedule_bundle/',
+    )
+    return [item['Key'] for item in listed.get('Contents', ())]
+
+
+def test_archive_bundle_stores_the_zip_bytes(_bucket: str) -> None:
+    """The archived object is the downloaded zip, byte for byte."""
+    payload = build_bundle()
+    key = archive_bundle(
+        client=boto3.client('s3'), bucket=_bucket,
+        bundle=StaticBundle(
+            payload=payload, sha256='deadbeef',
+            filename='buses_GTFS_PROD_20260923110000.zip',
+        ),
+        valid_from='2026-09-23',
+    )
+    assert key == (
+        'curated/schedule_bundle/valid_from=2026-09-23/'
+        'buses_GTFS_PROD_20260923110000.zip'
+    )
+    body = boto3.client('s3').get_object(Bucket=_bucket, Key=key)['Body']
+    assert body.read() == payload
+
+
+@pytest.mark.parametrize('filename', ['', '../../escape.zip'])
+def test_archive_bundle_keeps_the_key_under_its_partition(
+    _bucket: str, filename: str,
+) -> None:
+    """A missing or path-like filename still lands in the partition."""
+    key = archive_bundle(
+        client=boto3.client('s3'), bucket=_bucket,
+        bundle=StaticBundle(
+            payload=b'zip', sha256='deadbeef', filename=filename,
+        ),
+        valid_from='2026-09-23',
+    )
+    assert key.startswith('curated/schedule_bundle/valid_from=2026-09-23/')
+    assert key.count('/') == 3
+    assert key.endswith('.zip')
+
+
+@responses.activate
+def test_handler_archives_a_changed_bundle_once(
+    _bucket: str, _ssm_parameter: str,
+) -> None:
+    """A changed bundle is archived; an unchanged repeat is not."""
+    for _ in range(2):
+        responses.add(
+            responses.GET, BUNDLE_URL, body=build_bundle(),
+            status=HTTPStatus.OK,
+        )
+    os.environ['BUCKET_NAME'] = _bucket
+    os.environ['API_KEY_PARAMETER_NAME'] = _ssm_parameter
+    handler({}, _Context())
+    handler({}, _Context())
+    assert len(bundle_keys(bucket=_bucket)) == 1
+
+
+@responses.activate
+def test_handler_archives_a_bundle_that_fails_to_load(
+    _bucket: str, _ssm_parameter: str,
+) -> None:
+    """The zip is kept even when its dimensions cannot be written."""
+    responses.add(
+        responses.GET, BUNDLE_URL, body=b'not a zip',
+        status=HTTPStatus.OK,
+    )
+    os.environ['BUCKET_NAME'] = _bucket
+    os.environ['API_KEY_PARAMETER_NAME'] = _ssm_parameter
+    with pytest.raises(zipfile.BadZipFile):
+        handler({}, _Context())
+    assert len(bundle_keys(bucket=_bucket)) == 1
