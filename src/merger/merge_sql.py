@@ -17,16 +17,99 @@ was due is a forecast, not an observation.
 EARLIEST_PLAUSIBLE_ARRIVAL: Final[str] = '2000-01-01 00:00:00+00'
 """Arrivals before this instant are epoch artefacts, never observations."""
 
-TRIP_STOP_MERGE: Final[str] = f"""
-WITH partials AS (
-    SELECT * EXCLUDE (dt, hour)
-    FROM read_parquet(
-        $partials, hive_partitioning = true, union_by_name = true
+FIRST_TIMETABLED_HOUR: Final[str] = """
+CAST(split_part(
+    arg_min(COALESCE(departure_time, arrival_time), stop_sequence),
+    ':', 1
+) AS INTEGER)
+"""
+"""A trip's first timetabled hour, which exceeds 23 after midnight."""
+
+
+def service_day_partials(*, dim_source: str | None, date_column: str) -> str:
+    """Build the CTEs selecting one service day's partial rows.
+
+    The feed does not always send the service date. A trip whose first
+    timetabled time is 24:00 or later arrives with its start time
+    wrapped below 24:00 and ``start_date`` set to the next calendar
+    date. Nothing in the trip update itself marks these trips, so the
+    timetable decides: such a trip belongs to the day before its
+    ``start_date``. A trip that starts before midnight and runs past
+    it already carries its service date. A trip missing from the
+    timetable keeps its ``start_date``.
+
+    Parameters
+    ----------
+    dim_source : str | None
+        Path to the timetable snapshot, or None to take every
+        ``start_date`` as the service date.
+    date_column : str
+        The partial column holding the feed's start date.
+
+    Returns
+    -------
+    str
+        CTE definitions, without the leading ``WITH``, ending in
+        ``partials``. It holds every partial column except ``dt`` and
+        ``hour``, with the feed's date as ``start_date`` and the
+        derived ``service_date`` as ``YYYYMMDD``, and only rows for
+        ``$service_date``.
+    """
+    service_date = f'partial.{date_column}'
+    first_times = ''
+    join = ''
+    if dim_source is not None:
+        first_times = f"""
+        first_times AS (
+            SELECT trip_id, {FIRST_TIMETABLED_HOUR} >= 24 AS after_midnight
+            FROM read_parquet('{dim_source}')
+            GROUP BY trip_id
+        ),"""
+        join = 'LEFT JOIN first_times USING (trip_id)'
+        service_date = f"""CASE WHEN first_times.after_midnight THEN strftime(
+            strptime(partial.{date_column}, '%Y%m%d') - INTERVAL 1 DAY,
+            '%Y%m%d'
+        ) ELSE partial.{date_column} END"""
+    return f"""{first_times}
+    partials AS (
+        SELECT * FROM (
+            SELECT
+                partial.* EXCLUDE (dt, hour, {date_column}),
+                partial.{date_column} AS start_date,
+                {service_date} AS service_date
+            FROM read_parquet(
+                $partials, hive_partitioning = true, union_by_name = true
+            ) AS partial
+            {join}
+            WHERE partial.dt >= $dt_from
+              AND partial.dt <= $dt_to
+              AND partial.{date_column} IN ($service_date, strftime(
+                  strptime($service_date, '%Y%m%d') + INTERVAL 1 DAY,
+                  '%Y%m%d'
+              ))
+        )
+        WHERE service_date = $service_date
+    )"""
+
+
+def trip_stop_merge(*, dim_source: str | None) -> str:
+    """Build the merge of one service day's trip-stop partials.
+
+    Parameters
+    ----------
+    dim_source : str | None
+        Timetable snapshot deciding each trip's service day, or None.
+
+    Returns
+    -------
+    str
+        A query yielding one row per service-day stop.
+    """
+    partials = service_day_partials(
+        dim_source=dim_source, date_column='service_date',
     )
-    WHERE dt >= $dt_from
-      AND dt <= $dt_to
-      AND service_date = $service_date
-),
+    return f"""
+WITH {partials},
 latest AS (
     SELECT
         *,
@@ -94,6 +177,9 @@ SELECT
     ) AS is_reliable
 FROM merged
 """
+
+
+TRIP_STOP_MERGE: Final[str] = trip_stop_merge(dim_source=None)
 
 """Merge hourly trip-stop partials into one row per service-day stop.
 
@@ -203,7 +289,7 @@ def build_trip_stop_query(*, dim_source: str | None) -> str:
         """
     return f"""
     WITH day_merge AS (
-        {TRIP_STOP_MERGE}
+        {trip_stop_merge(dim_source=dim_source)}
     )
     SELECT day_merge.* REPLACE (
         strptime(day_merge.service_date, '%Y%m%d')::DATE AS service_date
@@ -214,18 +300,33 @@ def build_trip_stop_query(*, dim_source: str | None) -> str:
     """
 
 
-TRIP_MERGE: Final[str] = """
-WITH partials AS (
-    SELECT * EXCLUDE (dt, hour)
-    FROM read_parquet(
-        $partials, hive_partitioning = true, union_by_name = true
+def trip_merge(*, dim_source: str | None) -> str:
+    """Build the merge of one service day's trip-status partials.
+
+    Each partial covers the polls fetched in its own hour, so no poll
+    is counted twice: counts are summed, spans widened, and the final
+    status taken from the hour holding the latest status poll.
+    ``arg_max`` skips NULL arguments, so an hour whose trip carried no
+    status never overrides one that did.
+
+    Parameters
+    ----------
+    dim_source : str | None
+        Timetable snapshot deciding each trip's service day, or None.
+
+    Returns
+    -------
+    str
+        A query yielding one row per service-day trip, keeping the
+        feed's own ``start_date`` beside the service date.
+    """
+    partials = service_day_partials(
+        dim_source=dim_source, date_column='start_date',
     )
-    WHERE dt >= $dt_from
-      AND dt <= $dt_to
-      AND start_date = $service_date
-)
+    return f"""
+WITH {partials}
 SELECT
-    start_date AS service_date,
+    service_date,
     trip_id,
     start_date,
     arg_max(start_time, last_seen_at_utc) AS start_time,
@@ -241,20 +342,17 @@ SELECT
     MAX(last_canceled_at_utc) AS last_canceled_at_utc,
     BOOL_OR(had_vehicle) AS had_vehicle
 FROM partials
-GROUP BY start_date, trip_id
-"""
-"""Merge hourly trip-status partials into one row per service-day trip.
-
-Each partial covers the polls fetched in its own hour, so no poll is
-counted twice: counts are summed, spans widened, and the final status
-taken from the hour holding the latest status poll. ``arg_max`` skips
-NULL arguments, so an hour whose trip carried no status never
-overrides one that did.
+GROUP BY service_date, trip_id, start_date
 """
 
 
-def build_trip_query() -> str:
+def build_trip_query(*, dim_source: str | None) -> str:
     """Build the query assembling ``fact_trip`` for one service day.
+
+    Parameters
+    ----------
+    dim_source : str | None
+        Timetable snapshot deciding each trip's service day, or None.
 
     Returns
     -------
@@ -265,7 +363,7 @@ def build_trip_query() -> str:
     """
     return f"""
     WITH day_merge AS (
-        {TRIP_MERGE}
+        {trip_merge(dim_source=dim_source)}
     )
     SELECT day_merge.* REPLACE (
         strptime(day_merge.service_date, '%Y%m%d')::DATE AS service_date

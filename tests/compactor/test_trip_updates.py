@@ -347,8 +347,11 @@ def test_loop_route_keeps_both_calls_at_the_same_stop() -> None:
     assert rows == {3: 60, 17: 300}
 
 
-def test_service_date_comes_from_trip_start_date() -> None:
-    """start_date is authoritative, not the poll's calendar date."""
+def test_start_date_comes_from_the_trip_descriptor() -> None:
+    """Rows carry the feed's start date, not the poll's calendar date.
+
+    It is not always the service date. The merger derives that.
+    """
     reducer = TripStopReducer()
     reducer.add(
         feed=build_feed(

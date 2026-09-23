@@ -15,6 +15,7 @@ from merger.merge_sql import (
     TRIP_STOP_MERGE,
     build_trip_stop_query,
 )
+from schedule_loader.dimensions import SCHEDULED_STOP_TIME_SCHEMA
 
 
 @pytest.fixture
@@ -794,3 +795,199 @@ def test_position_merge_dedupes_on_key(
         },
     ).fetchall()
     assert len(result) == 2
+
+
+def write_schedule(*, tmp_path: Path, first_times: dict[str, str]) -> str:
+    """Write a timetable giving each trip two stops.
+
+    Parameters
+    ----------
+    tmp_path : Path
+        Pytest temporary directory.
+    first_times : dict[str, str]
+        Each trip's first timetabled time, ``HH:MM:SS``. Its second
+        stop is timetabled an hour later.
+
+    Returns
+    -------
+    str
+        Path to the written snapshot.
+    """
+    def later(time: str) -> str:
+        hours, rest = time.split(':', 1)
+        return f'{int(hours) + 1:02d}:{rest}'
+
+    rows = [
+        {
+            'trip_id': trip_id,
+            'stop_id': stop_id,
+            'stop_sequence': sequence,
+            'arrival_time': time,
+            'departure_time': time,
+            'shape_dist_traveled': None,
+        }
+        for trip_id, first in first_times.items()
+        for sequence, stop_id, time in (
+            (1, '200013', first), (2, '200099', later(first)),
+        )
+    ]
+    path = tmp_path / 'schedule.parquet'
+    pq.write_table(
+        pa.Table.from_pylist(rows, schema=SCHEDULED_STOP_TIME_SCHEMA), path,
+    )
+    return str(path)
+
+
+def merge_with_schedule(
+    *,
+    connection: duckdb.DuckDBPyConnection,
+    tmp_path: Path,
+    rows: list[dict[str, object]],
+    first_times: dict[str, str],
+    service_date: str,
+) -> list[dict[str, object]]:
+    """Merge partial rows for one service day against a timetable.
+
+    Parameters
+    ----------
+    connection : duckdb.DuckDBPyConnection
+        Open connection.
+    tmp_path : Path
+        Pytest temporary directory.
+    rows : list[dict[str, object]]
+        Partial trip-stop rows.
+    first_times : dict[str, str]
+        Each trip's first timetabled time.
+    service_date : str
+        Service date to assemble, as ``YYYYMMDD``.
+
+    Returns
+    -------
+    list[dict[str, object]]
+        Merged rows.
+    """
+    schedule = write_schedule(
+        tmp_path=tmp_path / 'dim', first_times=first_times,
+    ) if first_times else None
+    glob = write_partials(
+        tmp_path=tmp_path / 'partials', rows=rows, schema=TRIP_STOP_SCHEMA,
+    )
+    result = connection.execute(
+        build_trip_stop_query(dim_source=schedule),
+        merge_params(glob=glob, service_date=service_date),
+    ).fetchall()
+    columns = [d[0] for d in connection.description]
+    return [dict(zip(columns, row)) for row in result]
+
+
+def shift_row(*, trip_id: str, start_date: str) -> dict[str, object]:
+    """Build one partial row for a trip on a feed start date.
+
+    Parameters
+    ----------
+    trip_id : str
+        Trip identifier.
+    start_date : str
+        Feed start date, as ``YYYYMMDD``.
+
+    Returns
+    -------
+    dict[str, object]
+        One partial row at the trip's first stop.
+    """
+    row = trip_row(
+        hour=14, n_updates=1, delay=60,
+        last_update=datetime(2026, 9, 17, 14, 30, tzinfo=UTC),
+    )
+    row.update({'trip_id': trip_id, 'service_date': start_date})
+    return row
+
+
+@pytest.fixture
+def _after_midnight_dir(tmp_path: Path) -> Path:
+    """Provide a directory for one shift scenario.
+
+    Parameters
+    ----------
+    tmp_path : Path
+        Pytest temporary directory.
+
+    Returns
+    -------
+    Path
+        A fresh directory with partial and timetable subdirectories.
+    """
+    (tmp_path / 'dim').mkdir()
+    (tmp_path / 'partials').mkdir()
+    return tmp_path
+
+
+def test_trip_timetabled_after_midnight_joins_the_previous_day(
+    _connection: duckdb.DuckDBPyConnection,
+    _after_midnight_dir: Path,
+) -> None:
+    """The feed labels a 24:30 trip with the next calendar date.
+
+    Its first timetabled time says which service day it belongs to.
+    """
+    rows = [shift_row(trip_id='late', start_date='20260918')]
+    merged = merge_with_schedule(
+        connection=_connection, tmp_path=_after_midnight_dir, rows=rows,
+        first_times={'late': '24:30:00'}, service_date='20260917',
+    )
+    assert [row['trip_id'] for row in merged] == ['late']
+    assert str(merged[0]['service_date']) == '2026-09-17'
+
+
+def test_trip_timetabled_after_midnight_leaves_the_calendar_day(
+    _connection: duckdb.DuckDBPyConnection,
+    _after_midnight_dir: Path,
+) -> None:
+    """The same trip is not also filed under its calendar date."""
+    rows = [shift_row(trip_id='late', start_date='20260918')]
+    merged = merge_with_schedule(
+        connection=_connection, tmp_path=_after_midnight_dir, rows=rows,
+        first_times={'late': '24:30:00'}, service_date='20260918',
+    )
+    assert not merged
+
+
+def test_trip_crossing_midnight_keeps_its_start_date(
+    _connection: duckdb.DuckDBPyConnection,
+    _after_midnight_dir: Path,
+) -> None:
+    """A trip starting at 23:30 already carries its service date."""
+    rows = [shift_row(trip_id='crossing', start_date='20260917')]
+    merged = merge_with_schedule(
+        connection=_connection, tmp_path=_after_midnight_dir, rows=rows,
+        first_times={'crossing': '23:30:00'}, service_date='20260917',
+    )
+    assert [row['trip_id'] for row in merged] == ['crossing']
+
+
+def test_trip_missing_from_the_timetable_keeps_its_start_date(
+    _connection: duckdb.DuckDBPyConnection,
+    _after_midnight_dir: Path,
+) -> None:
+    """With no first time to consult, the feed's date stands."""
+    rows = [shift_row(trip_id='unknown', start_date='20260918')]
+    merged = merge_with_schedule(
+        connection=_connection, tmp_path=_after_midnight_dir, rows=rows,
+        first_times={'late': '24:30:00'}, service_date='20260918',
+    )
+    assert [row['trip_id'] for row in merged] == ['unknown']
+
+
+def test_shifted_trip_is_scheduled_from_its_service_day(
+    _connection: duckdb.DuckDBPyConnection,
+    _after_midnight_dir: Path,
+) -> None:
+    """24:30 on 17 September is 00:30 on the 18th, Sydney time."""
+    rows = [shift_row(trip_id='late', start_date='20260918')]
+    merged = merge_with_schedule(
+        connection=_connection, tmp_path=_after_midnight_dir, rows=rows,
+        first_times={'late': '24:30:00'}, service_date='20260917',
+    )
+    assert merged[0]['scheduled_arrival_utc'] == datetime(
+        2026, 9, 17, 14, 30, tzinfo=UTC,
+    )

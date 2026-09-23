@@ -50,7 +50,9 @@ def scheduled_instant(*, start_date: str, gtfs_time: str) -> datetime:
     Parameters
     ----------
     start_date : str
-        Service date as ``YYYYMMDD``.
+        Service date as ``YYYYMMDD``. Not the feed's ``start_date``
+        for a trip first timetabled at 24:00 or later, which the feed
+        labels with the next calendar date.
     gtfs_time : str
         Time as written in ``stop_times.txt``.
 
@@ -78,9 +80,9 @@ def scheduled_instant(*, start_date: str, gtfs_time: str) -> datetime:
 def service_date_for(*, instant: datetime) -> date:
     """Map a UTC instant to the Sydney calendar date containing it.
 
-    This is the calendar date, not the GTFS service date - a trip that
-    runs past midnight keeps the service date carried on its own
-    ``start_date`` field, which is authoritative and used in preference.
+    This is the calendar date, not the GTFS service date. A trip's
+    service date comes from its ``start_date`` and, for a trip first
+    timetabled at 24:00 or later, the day before it.
 
     Parameters
     ----------

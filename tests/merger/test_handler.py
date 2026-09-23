@@ -26,6 +26,7 @@ from merger.handler import (
     merge_trip_stops,
     partial_hour_from_key,
     partition_bounds,
+    resolve_dim_source,
     target_service_date,
 )
 from schedule_loader.dimensions import SCHEDULED_STOP_TIME_SCHEMA
@@ -744,3 +745,61 @@ def test_merge_trip_stops_resolves_scheduled_arrival(
     ))
     assert by_sequence[1] == datetime(2026, 9, 16, 21, 30, tzinfo=UTC)
     assert by_sequence[2] == datetime(2026, 9, 17, 15, 15, tzinfo=UTC)
+
+
+def put_snapshots(*, bucket: str, valid_from: list[str]) -> None:
+    """Store an empty timetable snapshot for each ``valid_from``.
+
+    Parameters
+    ----------
+    bucket : str
+        Destination bucket.
+    valid_from : list[str]
+        Snapshot dates, ``YYYY-MM-DD``.
+    """
+    client = boto3.client('s3')
+    for value in valid_from:
+        client.put_object(
+            Bucket=bucket,
+            Key=(
+                'curated/dim_scheduled_stop_time/'
+                f'valid_from={value}/data.parquet'
+            ),
+            Body=b'',
+        )
+
+
+def test_resolve_dim_source_takes_the_latest_snapshot_in_effect(
+    _bucket: str,
+) -> None:
+    """A service day uses the newest snapshot at or before it."""
+    put_snapshots(bucket=_bucket, valid_from=['2026-09-19', '2026-09-22'])
+    assert resolve_dim_source(
+        bucket=_bucket, service_date=date(2026, 9, 23),
+        session=boto3.Session(),
+    ) == (
+        f's3://{_bucket}/curated/dim_scheduled_stop_time/'
+        'valid_from=2026-09-22/data.parquet'
+    )
+
+
+def test_resolve_dim_source_falls_back_to_the_earliest_snapshot(
+    _bucket: str,
+) -> None:
+    """A day before the first snapshot borrows the earliest one."""
+    put_snapshots(bucket=_bucket, valid_from=['2026-09-22', '2026-09-19'])
+    assert resolve_dim_source(
+        bucket=_bucket, service_date=date(2026, 9, 17),
+        session=boto3.Session(),
+    ) == (
+        f's3://{_bucket}/curated/dim_scheduled_stop_time/'
+        'valid_from=2026-09-19/data.parquet'
+    )
+
+
+def test_resolve_dim_source_without_snapshots_is_none(_bucket: str) -> None:
+    """With no timetable ever captured there is nothing to join."""
+    assert resolve_dim_source(
+        bucket=_bucket, service_date=date(2026, 9, 17),
+        session=boto3.Session(),
+    ) is None

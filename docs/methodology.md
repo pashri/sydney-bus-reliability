@@ -200,10 +200,23 @@ These are two different fields describing two different things, and
 conflating them is an easy mistake to make.
 
 `NO_DATA` sits on an individual stop. It means there is no live timing for
-that stop. `CANCELED` sits on the whole trip, was measured on 1.56% of trip
-updates, and does not stop the trip carrying a full set of stop-time updates
-anyway. Neither implies the other. Any code that reads one to infer the
+that stop. `CANCELED` sits on the whole trip and was measured on 1.56% of trip
+updates. Neither implies the other. Any code that reads one to infer the
 other will be wrong.
+
+A `CANCELED` update carries only the trip descriptor. Across every poll for
+service day 22 September 2026, none of 149,301 `CANCELED` updates had a
+stop-time update, a vehicle or a timestamp. So cancellations never appear in
+`fact_trip_stop`; they are recorded in `fact_trip`.
+
+Cancellation is not final. That day 511 trips were `CANCELED` at some point
+and 21 flipped back at least once; 19 ended `SCHEDULED`, and 18 of those then
+carried a vehicle, so they ran. Some cancellations lasted a poll or two,
+others several hours. Just over half of the trips that went from `SCHEDULED`
+to `CANCELED` did so after their scheduled start, many with a bus already
+attached. `fact_trip` keeps the evidence - final status, polls per status,
+first and last cancelled poll - and which of those counts as a cancellation
+is an analysis rule.
 
 ### 5. About 3% of running trips report no bus at all
 
@@ -250,9 +263,11 @@ calendar ran from 17 September 2026 to 1 January 2027, but only 3 services
 were active on the day it was generated, against 98 the following day.
 
 It therefore cannot reconstruct a day that has already gone. That has a
-direct consequence for this project: 16 to 18 September 2026 have live data
-but no timetable to compare it against, because no timetable file was
-captured on or before those dates.
+direct consequence for this project: no timetable file was captured on or
+before 16 to 18 September 2026. Those days borrow the earliest snapshot,
+from 19 September, on the assumption that the timetable did not change in
+between. The assumption cannot be checked, because the bundle itself was not
+archived until later.
 
 ### 9. Identifiers that don't match are recorded, not repaired
 

@@ -138,7 +138,8 @@ def stop_time_record(*, row: Row) -> Record:
     """Build one ``dim_scheduled_stop_time`` record.
 
     Times are kept as written. Resolving the past-24:00 convention
-    needs the trip's ``start_date``, which lives in ``trips.txt``.
+    needs the trip's service date, which only the realtime feed
+    carries.
 
     Parameters
     ----------
