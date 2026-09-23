@@ -30,6 +30,7 @@ from typing import Any, Final
 
 import boto3
 from botocore.config import Config
+from botocore.exceptions import BotoCoreError, ClientError
 
 from common.service_day import merge_window, service_date_for
 
@@ -43,6 +44,9 @@ READ_TIMEOUT: Final[int] = 900  # seconds
 """Longer than either function's own timeout, so a slow success is
 not reported as a failure."""
 MAX_FAILURES: Final[int] = 3
+COMPACTION_TRUSTED_FOR: Final[timedelta] = timedelta(days=2)
+"""How long a logged compaction is trusted. Its partials expire after
+three days, so an older one is compacted again."""
 
 
 def parse_args() -> argparse.Namespace:
@@ -222,18 +226,33 @@ class ReplayLog:
 
     path: Path | None
 
-    def done(self) -> set[str]:
+    def done(self, *, now: datetime | None = None) -> set[str]:
         """Read the steps an earlier run finished.
+
+        Parameters
+        ----------
+        now : datetime | None
+            Current UTC time. Defaults to the clock.
 
         Returns
         -------
         set[str]
             Step names, empty without a log or before the first run.
+            A compaction logged longer ago than
+            ``COMPACTION_TRUSTED_FOR`` is left out.
         """
         if self.path is None or not self.path.exists():
             return set()
-        lines = self.path.read_text().splitlines()
-        return {json.loads(line)['step'] for line in lines if line}
+        cutoff = (now or datetime.now(tz=UTC)) - COMPACTION_TRUSTED_FOR
+        entries = (
+            json.loads(line)
+            for line in self.path.read_text().splitlines() if line
+        )
+        return {
+            entry['step'] for entry in entries
+            if not entry['step'].startswith('compact ')
+            or datetime.fromisoformat(entry['finished_at_utc']) >= cutoff
+        }
 
     def record(self, *, step: str) -> None:
         """Append one finished step.
@@ -271,6 +290,7 @@ def invoker(
     """
     client = session.client('lambda', config=Config(
         read_timeout=READ_TIMEOUT, retries={'max_attempts': 0},
+        tcp_keepalive=True,
     ))
 
     def invoke(event: dict[str, Any]) -> str | None:
@@ -291,6 +311,31 @@ def invoker(
         ))
 
     return invoke
+
+
+def attempt(
+    *,
+    invoke: Callable[[dict[str, Any]], str | None],
+    event: dict[str, Any],
+) -> str | None:
+    """Invoke once, reporting a transport or service error as a failure.
+
+    Parameters
+    ----------
+    invoke : Callable[[dict[str, Any]], str | None]
+        Invokes one event, returning its failure or None.
+    event : dict[str, Any]
+        The invocation event.
+
+    Returns
+    -------
+    str | None
+        The failure, or None when it succeeded.
+    """
+    try:
+        return invoke(event)
+    except (BotoCoreError, ClientError, OSError) as error:
+        return f'{type(error).__name__}: {error}'
 
 
 def run_steps(
@@ -324,7 +369,8 @@ def run_steps(
     failures = 0
     with ThreadPoolExecutor(max_workers=parallel) as pool:
         futures = {
-            name: pool.submit(invoke, event) for name, event in pending
+            name: pool.submit(attempt, invoke=invoke, event=event)
+            for name, event in pending
         }
         for name, future in futures.items():
             failure = future.result()
