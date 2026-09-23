@@ -24,11 +24,13 @@ from merger.handler import (
     MergeTable,
     handler,
     merge_trip_stops,
+    merge_trips,
     partial_hour_from_key,
+    partial_paths,
     partition_bounds,
-    resolve_dim_source,
     target_service_date,
 )
+from merger.schedule import resolve_dim_source
 from schedule_loader.dimensions import SCHEDULED_STOP_TIME_SCHEMA
 
 
@@ -731,7 +733,6 @@ def test_merge_trip_stops_resolves_scheduled_arrival(
         connection=connection,
         bucket=_bucket,
         service_date=service_date,
-        window=merge_window(service_date=service_date),
         session=boto3.Session(),
     )
     body = client.get_object(
@@ -803,3 +804,43 @@ def test_resolve_dim_source_without_snapshots_is_none(_bucket: str) -> None:
         bucket=_bucket, service_date=date(2026, 9, 17),
         session=boto3.Session(),
     ) is None
+
+
+def test_partial_paths_lists_only_partitions_inside_the_bounds(
+    _bucket: str,
+) -> None:
+    """Partials outside the dt bounds are never handed to DuckDB."""
+    client = boto3.client('s3')
+    for day in ('2026-09-15', '2026-09-16', '2026-09-20'):
+        client.put_object(
+            Bucket=_bucket,
+            Key=f'curated/_partial/trip/dt={day}/hour=03/data.parquet',
+            Body=b'',
+        )
+    assert partial_paths(
+        client=client, bucket=_bucket, table='trip',
+        bounds=('2026-09-16', '2026-09-19'),
+    ) == [
+        f's3://{_bucket}/curated/_partial/trip/dt=2026-09-16/'
+        'hour=03/data.parquet',
+    ]
+
+
+def test_merge_trips_skips_a_day_without_trip_partials(
+    _bucket: str, _s3_endpoint: str,
+) -> None:
+    """A day with no trip-status partials writes nothing and reports 0."""
+    service_date = date(2026, 9, 17)
+    connection = duckdb.connect()
+    configure(
+        connection=connection, limits=DUCKDB_LIMITS,
+        endpoint=_s3_endpoint,
+    )
+    assert merge_trips(
+        connection=connection, bucket=_bucket, service_date=service_date,
+        session=boto3.Session(),
+    ) == 0
+    listed = boto3.client('s3').list_objects_v2(
+        Bucket=_bucket, Prefix='curated/fact_trip/',
+    )
+    assert 'Contents' not in listed

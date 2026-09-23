@@ -31,6 +31,7 @@ from merger.merge_sql import (
     build_trip_query,
     build_trip_stop_query,
 )
+from merger.schedule import resolve_dim_source
 
 logger = Logger()
 
@@ -228,30 +229,89 @@ def merge_collector_run(
     return count_parquet_rows(connection=connection, target=target)
 
 
-def partial_glob(*, bucket: str, table: str) -> str:
-    """Build the S3 glob of every hourly partial for one table.
+def partial_paths(
+    *,
+    client: Any,
+    bucket: str,
+    table: str,
+    bounds: tuple[str, str],
+) -> list[str]:
+    """List one table's partial objects inside the ``dt`` bounds.
 
-    One glob across all UTC dates, not one per date in the merge
-    window. DuckDB's ``read_parquet`` errors on a glob list entry
-    matching zero files, which a missing hour would trigger.
-    Narrowing to the service day is left to each merge query's own
-    ``WHERE`` clause.
+    DuckDB is handed these paths rather than a glob. Reading partials
+    by column name makes it open every file a glob matches, so a glob
+    would make each merge read every partial still alive, and fail on
+    any unreadable one, however far outside the bounds.
 
     Parameters
     ----------
+    client : Any
+        A boto3 S3 client.
     bucket : str
         Bucket holding the curated layer.
     table : str
         One of ``vehicle_position``, ``trip_stop`` or ``trip``.
+    bounds : tuple[str, str]
+        Inclusive ``dt`` partition values, from ``partition_bounds``.
 
     Returns
     -------
-    str
-        A glob matching every partial ever written for this table.
+    list[str]
+        S3 paths, empty when no partial lies inside the bounds.
     """
-    return (
-        f's3://{bucket}/{PARTIAL_PREFIX}/{table}/dt=*/hour=*/data.parquet'
+    first, last = (date.fromisoformat(bound) for bound in bounds)
+    days = (
+        first + timedelta(days=offset)
+        for offset in range((last - first).days + 1)
     )
+    pages = (
+        page
+        for day in days
+        for page in client.get_paginator('list_objects_v2').paginate(
+            Bucket=bucket, Prefix=f'{PARTIAL_PREFIX}/{table}/dt={day}/',
+        )
+    )
+    return [
+        f's3://{bucket}/{item["Key"]}'
+        for page in pages
+        for item in page.get('Contents', ())
+    ]
+
+
+def copy_merge(
+    *,
+    connection: duckdb.DuckDBPyConnection,
+    query: str,
+    target: str,
+    parameters: dict[str, Any],
+) -> int:
+    """Write one merge query's result to a Parquet object.
+
+    Parameters
+    ----------
+    connection : duckdb.DuckDBPyConnection
+        Configured DuckDB connection.
+    query : str
+        The merge query.
+    target : str
+        S3 path to write.
+    parameters : dict[str, Any]
+        Query parameters. ``partials`` is the list of paths to read.
+
+    Returns
+    -------
+    int
+        Rows written, or zero without writing anything when there are
+        no partials to read, since DuckDB refuses an empty file list.
+    """
+    if not parameters['partials']:
+        logger.warning('No partials to merge', extra={'target': target})
+        return 0
+    connection.execute(
+        f"COPY ({query}) TO '{target}' (FORMAT PARQUET, COMPRESSION ZSTD)",
+        parameters,
+    )
+    return count_parquet_rows(connection=connection, target=target)
 
 
 def expected_hours(
@@ -429,109 +489,11 @@ def count_partial_coverage(
     return len(hours) * len(FROM_PARTIALS), read
 
 
-DIM_SCHEDULED_STOP_TIME_PREFIX: Final[str] = (
-    'curated/dim_scheduled_stop_time/'
-)
-
-
-def valid_from_for(
-    *,
-    client: Any,
-    bucket: str,
-    service_date: date,
-) -> str | None:
-    """Find the schedule snapshot to use for a service date.
-
-    Parameters
-    ----------
-    client : Any
-        A boto3 S3 client.
-    bucket : str
-        Bucket holding the curated layer.
-    service_date : date
-        The service date whose schedule to resolve.
-
-    Returns
-    -------
-    str | None
-        The latest ``valid_from`` partition value at or before
-        ``service_date``. For a day before the first snapshot, the
-        earliest one, with a warning: collection began before the
-        timetable was first captured. None when no snapshot exists.
-    """
-    pages = client.get_paginator('list_objects_v2').paginate(
-        Bucket=bucket,
-        Prefix=DIM_SCHEDULED_STOP_TIME_PREFIX,
-        Delimiter='/',
-    )
-    candidates = (
-        prefix['Prefix'].removeprefix(
-            DIM_SCHEDULED_STOP_TIME_PREFIX,
-        ).removeprefix('valid_from=').rstrip('/')
-        for page in pages
-        for prefix in page.get('CommonPrefixes', ())
-    )
-    snapshots: list[str] = sorted(candidates)
-    eligible = [
-        value for value in snapshots
-        if date.fromisoformat(value) <= service_date
-    ]
-    if eligible:
-        return eligible[-1]
-    if not snapshots:
-        return None
-    logger.warning(
-        'No snapshot in effect, using the earliest',
-        extra={'valid_from': snapshots[0]},
-    )
-    return snapshots[0]
-
-
-def resolve_dim_source(
-    *,
-    bucket: str,
-    service_date: date,
-    session: boto3.Session,
-) -> str | None:
-    """Locate the schedule snapshot in effect for one service date.
-
-    Lists S3 prefixes only. No dimension rows are fetched into
-    Python, so no ``TIMESTAMPTZ`` value crosses the DuckDB boundary.
-    The join happens entirely in SQL, in ``build_trip_stop_query``.
-
-    Parameters
-    ----------
-    bucket : str
-        Bucket holding the curated layer.
-    service_date : date
-        The Sydney service date being assembled.
-    session : boto3.Session
-        Session used to list dimension snapshots.
-
-    Returns
-    -------
-    str | None
-        S3 path to the snapshot's Parquet object, chosen by
-        ``valid_from_for``, or None when no snapshot exists.
-    """
-    valid_from = valid_from_for(
-        client=session.client('s3'), bucket=bucket,
-        service_date=service_date,
-    )
-    if valid_from is None:
-        return None
-    return (
-        f's3://{bucket}/{DIM_SCHEDULED_STOP_TIME_PREFIX}'
-        f'valid_from={valid_from}/data.parquet'
-    )
-
-
 def merge_trip_stops(
     *,
     connection: duckdb.DuckDBPyConnection,
     bucket: str,
     service_date: date,
-    window: tuple[datetime, datetime],
     session: boto3.Session | None = None,
 ) -> int:
     """Fold one service day's trip-stop partials into one table.
@@ -544,9 +506,6 @@ def merge_trip_stops(
         Bucket holding the curated layer.
     service_date : date
         The Sydney service date being assembled.
-    window : tuple[datetime, datetime]
-        UTC range of partials to read, used to bound the partitions
-        scanned.
     session : boto3.Session | None
         Optional boto3 session, used to list dimension snapshots.
         Defaults to a new session.
@@ -556,28 +515,11 @@ def merge_trip_stops(
     int
         Rows written.
     """
-    glob = partial_glob(bucket=bucket, table='trip_stop')
-    target = (
-        f's3://{bucket}/curated/fact_trip_stop/'
-        f'service_date={service_date:%Y-%m-%d}/data.parquet'
-    )
-    dim_source = resolve_dim_source(
-        bucket=bucket, service_date=service_date,
+    return merge_trip_table(
+        connection=connection, bucket=bucket, service_date=service_date,
         session=session or boto3.Session(),
+        table=MergeTable.TRIP_STOP,
     )
-    query = build_trip_stop_query(dim_source=dim_source)
-    dt_from, dt_to = partition_bounds(window=window)
-    connection.execute(
-        f"COPY ({query}) TO '{target}' "
-        f'(FORMAT PARQUET, COMPRESSION ZSTD)',
-        {
-            'partials': glob,
-            'service_date': f'{service_date:%Y%m%d}',
-            'dt_from': dt_from,
-            'dt_to': dt_to,
-        },
-    )
-    return count_parquet_rows(connection=connection, target=target)
 
 
 def merge_trips(
@@ -585,7 +527,6 @@ def merge_trips(
     connection: duckdb.DuckDBPyConnection,
     bucket: str,
     service_date: date,
-    window: tuple[datetime, datetime],
     session: boto3.Session | None = None,
 ) -> int:
     """Fold one service day's trip-status partials into one table.
@@ -598,9 +539,6 @@ def merge_trips(
         Bucket holding the curated layer.
     service_date : date
         The Sydney service date being assembled.
-    window : tuple[datetime, datetime]
-        UTC range of partials to read, used to bound the partitions
-        scanned.
     session : boto3.Session | None
         Optional boto3 session, used to list dimension snapshots.
         Defaults to a new session.
@@ -610,26 +548,70 @@ def merge_trips(
     int
         Rows written.
     """
-    target = (
-        f's3://{bucket}/curated/fact_trip/'
-        f'service_date={service_date:%Y-%m-%d}/data.parquet'
-    )
-    dim_source = resolve_dim_source(
-        bucket=bucket, service_date=service_date,
+    return merge_trip_table(
+        connection=connection, bucket=bucket, service_date=service_date,
         session=session or boto3.Session(),
+        table=MergeTable.TRIP,
     )
-    dt_from, dt_to = partition_bounds(window=window)
-    connection.execute(
-        f"COPY ({build_trip_query(dim_source=dim_source)}) TO '{target}' "
-        f'(FORMAT PARQUET, COMPRESSION ZSTD)',
-        {
-            'partials': partial_glob(bucket=bucket, table=MergeTable.TRIP),
+
+
+def merge_trip_table(
+    *,
+    connection: duckdb.DuckDBPyConnection,
+    bucket: str,
+    service_date: date,
+    session: boto3.Session,
+    table: MergeTable,
+) -> int:
+    """Fold one service day of a timetable-dated table.
+
+    Both trip tables file a trip under the service day its timetable
+    gives, so both read the snapshot in effect.
+
+    Parameters
+    ----------
+    connection : duckdb.DuckDBPyConnection
+        Configured DuckDB connection.
+    bucket : str
+        Bucket holding the curated layer.
+    service_date : date
+        The Sydney service date being assembled. Its merge window
+        bounds the partitions scanned.
+    session : boto3.Session
+        Session used to list partials and dimension snapshots.
+    table : MergeTable
+        Either ``trip_stop`` or ``trip``.
+
+    Returns
+    -------
+    int
+        Rows written.
+    """
+    dim_source = resolve_dim_source(
+        bucket=bucket, service_date=service_date, session=session,
+    )
+    build = (
+        build_trip_stop_query if table is MergeTable.TRIP_STOP
+        else build_trip_query
+    )
+    bounds = partition_bounds(window=merge_window(service_date=service_date))
+    return copy_merge(
+        connection=connection,
+        query=build(dim_source=dim_source),
+        target=(
+            f's3://{bucket}/curated/fact_{table}/'
+            f'service_date={service_date:%Y-%m-%d}/data.parquet'
+        ),
+        parameters={
+            'partials': partial_paths(
+                client=session.client('s3'), bucket=bucket, table=table,
+                bounds=bounds,
+            ),
             'service_date': f'{service_date:%Y%m%d}',
-            'dt_from': dt_from,
-            'dt_to': dt_to,
+            'dt_from': bounds[0],
+            'dt_to': bounds[1],
         },
     )
-    return count_parquet_rows(connection=connection, target=target)
 
 
 def merge_positions(
@@ -638,6 +620,7 @@ def merge_positions(
     bucket: str,
     service_date: date,
     window: tuple[datetime, datetime],
+    session: boto3.Session | None = None,
 ) -> int:
     """Fold one service day's position partials into one table.
 
@@ -651,30 +634,35 @@ def merge_positions(
         The Sydney service date being assembled.
     window : tuple[datetime, datetime]
         UTC range of partials to read.
+    session : boto3.Session | None
+        Optional boto3 session, used to list partials. Defaults to a
+        new session.
 
     Returns
     -------
     int
         Rows written.
     """
-    glob = partial_glob(bucket=bucket, table='vehicle_position')
-    target = (
-        f's3://{bucket}/curated/fact_vehicle_position/'
-        f'service_date={service_date:%Y-%m-%d}/data.parquet'
-    )
     dt_from, dt_to = partition_bounds(window=window)
-    connection.execute(
-        f"COPY ({POSITION_MERGE}) TO '{target}' "
-        f'(FORMAT PARQUET, COMPRESSION ZSTD)',
-        {
-            'partials': glob,
+    return copy_merge(
+        connection=connection,
+        query=POSITION_MERGE,
+        target=(
+            f's3://{bucket}/curated/fact_vehicle_position/'
+            f'service_date={service_date:%Y-%m-%d}/data.parquet'
+        ),
+        parameters={
+            'partials': partial_paths(
+                client=(session or boto3.Session()).client('s3'),
+                bucket=bucket, table=MergeTable.VEHICLE_POSITION,
+                bounds=(dt_from, dt_to),
+            ),
             'window_start': window[0],
             'window_end': window[1],
             'dt_from': dt_from,
             'dt_to': dt_to,
         },
     )
-    return count_parquet_rows(connection=connection, target=target)
 
 
 def merge_partial_tables(
@@ -709,15 +697,15 @@ def merge_partial_tables(
     window = merge_window(service_date=service_date)
     stops = MergeTable.TRIP_STOP in tables and merge_trip_stops(
         connection=connection, bucket=bucket, service_date=service_date,
-        window=window, session=session,
+        session=session,
     )
     positions = MergeTable.VEHICLE_POSITION in tables and merge_positions(
         connection=connection, bucket=bucket, service_date=service_date,
-        window=window,
+        window=window, session=session,
     )
     trips = MergeTable.TRIP in tables and merge_trips(
         connection=connection, bucket=bucket, service_date=service_date,
-        window=window, session=session,
+        session=session,
     )
     return int(stops), int(positions), int(trips)
 
