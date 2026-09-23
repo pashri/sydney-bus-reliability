@@ -62,6 +62,7 @@ TRIP_STOP_FIELDS: Final[list[pa.Field[Any]]] = [
     ),
     pa.field('departure_delay_s', pa.int32()),
     pa.field('last_update_at_utc', pa.timestamp('s', tz='UTC')),
+    pa.field('arrival_updated_at_utc', pa.timestamp('s', tz='UTC')),
     pa.field('n_updates', pa.int32()),
     pa.field('schedule_relationship', pa.string()),
     pa.field('had_vehicle', pa.bool_()),
@@ -230,6 +231,7 @@ class TripStopReducer:
             'final_predicted_departure_utc': None,
             'departure_delay_s': None,
             'last_update_at_utc': None,
+            'arrival_updated_at_utc': None,
             'n_updates': 0,
             'schedule_relationship': None,
             'had_vehicle': False,
@@ -282,7 +284,8 @@ class TripStopReducer:
         """Apply a genuine observation, latest-wins.
 
         An observation with no arrival keeps the row's earlier
-        arrival and its delay, while its departure still lands.
+        arrival, its delay and ``arrival_updated_at_utc``, while its
+        departure still lands and ``last_update_at_utc`` moves on.
 
         Parameters
         ----------
@@ -301,6 +304,7 @@ class TripStopReducer:
         arrival = stop_event(stop=stop, name='arrival')
         if arrival != (None, None):
             row['final_predicted_arrival_utc'], row['delay_s'] = arrival
+            row['arrival_updated_at_utc'] = seen_at
         departure, departure_delay = stop_event(
             stop=stop, name='departure',
         )

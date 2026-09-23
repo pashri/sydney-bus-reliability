@@ -433,3 +433,33 @@ def test_zero_arrival_keeps_the_earlier_arrival() -> None:
 def test_stop_rows_do_not_carry_trip_status() -> None:
     """Trip status lives in the trip partial alone."""
     assert 'trip_schedule_relationship' not in TRIP_STOP_SCHEMA.names
+
+
+def test_arrival_update_time_marks_the_last_arrival_sent() -> None:
+    """A later update without an arrival leaves its update time alone.
+
+    Otherwise a stale arrival would be judged fresh by a departure-only
+    update that came after it.
+    """
+    reducer = TripStopReducer()
+    reducer.add(
+        feed=build_feed(
+            relationship=SCHEDULED, arrival_time=1789592400, delay=120,
+            stamp=1789592300, departure_time=1789592410,
+        ),
+        fetched_at=FETCHED,
+    )
+    reducer.add(
+        feed=build_feed(
+            relationship=SCHEDULED, arrival_time=0, delay=0,
+            stamp=1789592500, departure_time=1789592460,
+        ),
+        fetched_at=FETCHED,
+    )
+    row = next(reducer.batches()).to_pylist()[0]
+    assert row['arrival_updated_at_utc'] == datetime(
+        2026, 9, 16, 20, 58, 20, tzinfo=UTC,
+    )
+    assert row['last_update_at_utc'] == datetime(
+        2026, 9, 16, 21, 1, 40, tzinfo=UTC,
+    )
