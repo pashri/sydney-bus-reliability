@@ -115,6 +115,12 @@ Timetables therefore count hours past 24. A departure written `25:10:00`
 leaves at 01:10 the following morning. Hour 30 appears in the real Transport
 for NSW bundle, meaning 06:00 the next day.
 
+The live feed does not always say which service day a trip belongs to. A
+trip whose first timetabled time is 24:00 or later is sent with its start
+time wrapped below 24:00 and its start date set to the next calendar date.
+The merger corrects this from the timetable when it builds the `fact_`
+tables, so a `service_date` there is the true service day.
+
 ### Facts and dimensions
 
 Tables named `fact_` hold things that happened: observations, one row per
@@ -323,7 +329,7 @@ Dataset page:
 
 | Column | Type | What it means | Where it comes from |
 | --- | --- | --- | --- |
-| `trip_update.trip.start_date` | `string` | The service day this trip belongs to, as `YYYYMMDD`, Sydney local. Authoritative: a trip running past midnight keeps the date it started under. | Read directly, so an unsent value reads as `''`. |
+| `trip_update.trip.start_date` | `string` | The day this trip starts, as `YYYYMMDD`, Sydney local. Usually the service day: a trip that starts before midnight and runs past it keeps the date it started under. **Not the service day** for a trip timetabled to start at 24:00 or later: the feed sends the next calendar date, and writes `start_time` minus 24 hours. | Read directly, so an unsent value reads as `''`. |
 | `trip_update.trip.trip_id` | `string` | Which scheduled run this is. Joins to `dim_trip`. | Populated. |
 | `trip_update.trip.route_id` | `string` | Which route. Joins to `dim_route`. | Populated. |
 | `trip_update.trip.schedule_relationship` | `enum` | Whether the whole trip is running as timetabled. `CANCELED` here means the trip is cancelled, and it is a different thing from `NO_DATA` on a stop. See [methodology 4](methodology.md#4-no_data-does-not-mean-cancelled). | Read only when sent. A `CANCELED` update carries only the trip descriptor: no stop-time updates, no vehicle and no timestamp. A trip can be cancelled and later reinstated. |
@@ -404,7 +410,7 @@ Among real observations, the latest wins.
 
 | Column | Type | What it means | Where it comes from |
 | --- | --- | --- | --- |
-| `service_date` | `string` | The service day, as `YYYYMMDD`, Sydney local. Part of the row's identity. | Copied from `trip_update.trip.start_date`. `''` if the feed omitted it. |
+| `service_date` | `string` | The feed's start date, as `YYYYMMDD`, Sydney local. Part of the row's identity. Despite the name, not always the service day - see [Service day](#service-day). The merger derives the true one. | Copied from `trip_update.trip.start_date`. `''` if the feed omitted it. |
 | `trip_id` | `string` | Which scheduled run. Joins to `dim_trip.trip_id`. | Copied from `trip_update.trip.trip_id`. `''` if omitted. |
 | `stop_id` | `string` | Which stop. Joins to `dim_stop.stop_id`. | Copied from `stop_time_update.stop_id`. `''` if omitted. |
 | `stop_sequence` | `int32` | Position of this stop in the trip's order. Part of the row's identity, because a loop route calls the same stop twice. | Copied from `stop_time_update.stop_sequence`. Null if the feed omitted it, which is not observed in practice. |
@@ -499,7 +505,7 @@ measured.
 
 | Column | Type | What it means | Where it comes from |
 | --- | --- | --- | --- |
-| `service_date` | `date32[day]` | The service day, Sydney local. Stored as a date so it matches the `service_date=` folder it is written under: most query engines expose that folder as a column of the same name, and if the two disagreed a reader would silently get one or the other. | Converted from the partial's `YYYYMMDD` text, which is how the feed sends it. |
+| `service_date` | `date32[day]` | The service day, Sydney local. Stored as a date so it matches the `service_date=` folder it is written under: most query engines expose that folder as a column of the same name, and if the two disagreed a reader would silently get one or the other. | The partial's start date, moved back one day for a trip whose first timetabled time is 24:00 or later, then converted to a date. The timetable used is the one `scheduled_arrival_utc` uses; a trip missing from it keeps its start date. |
 | `trip_id` | `string` | Which scheduled run. Joins to `dim_trip.trip_id`. | Carried through. |
 | `stop_id` | `string` | Which stop. Joins to `dim_stop.stop_id`. | Carried through. |
 | `stop_sequence` | `int32` | Position of this stop in the trip's order. | Carried through. |
@@ -514,10 +520,11 @@ measured.
 | `had_vehicle` | `bool` | True if a bus was attached to this trip at any point in the day. | True if any hour said so. Never null. |
 | `lost_tracking` | `bool` | True when the bus stopped reporting before reaching this stop and only echoes followed. The prediction is stale. | Recomputed for the whole day: true when the day's latest observation of any kind is later than its latest real one. False when there was never a real observation. Never null. |
 | `is_reliable` | `bool` | True when the arrival time is worth trusting: a real delay exists, tracking did not drop, the arrival is after 2000 (never an epoch artefact), and the last update landed no more than 60 seconds before the predicted arrival. **Headline figures use only rows where this is true.** | Computed. False when any condition fails, including when a delay exists but no predicted arrival time does, leaving nothing to compare against. Never null. The 60-second rule is explained in [methodology 1](methodology.md#1-arrival-times-are-predictions-not-observations). |
-| `scheduled_arrival_utc` | `timestamp[us, tz=UTC]` | When the timetable said the bus should arrive. Subtract from `final_predicted_arrival_utc` to get lateness directly. | Joined from `dim_scheduled_stop_time` on `trip_id` and `stop_sequence`, using the most recent snapshot in effect on or before this service date. Its `HH:MM:SS` reading, which may exceed 24 hours, is added to Sydney midnight and converted to UTC. Null when no snapshot exists for the date, or when that snapshot has no matching row. Which midnight it counts from is settled one way here and is not confirmed against TfNSW - see [methodology 10](methodology.md#10-which-midnight-a-timetable-time-counts-from). |
+| `scheduled_arrival_utc` | `timestamp[us, tz=UTC]` | When the timetable said the bus should arrive. Subtract from `final_predicted_arrival_utc` to get lateness directly. | Joined from `dim_scheduled_stop_time` on `trip_id` and `stop_sequence`, using the most recent snapshot in effect on or before this service date, or the earliest snapshot for a day before any was captured. Its `HH:MM:SS` reading, which may exceed 24 hours, is added to Sydney midnight and converted to UTC. Null when no snapshot exists at all, or when the snapshot has no matching row. Which midnight it counts from is settled one way here and is not confirmed against TfNSW - see [methodology 10](methodology.md#10-which-midnight-a-timetable-time-counts-from). |
 
-Days before the first timetable was captured have live data and no schedule
-to compare it to, so `scheduled_arrival_utc` is null throughout them. See
+Days before the first timetable was captured borrow the earliest snapshot,
+on the assumption that the timetable did not change in between. That
+cannot be checked, because the bundle itself was not archived then. See
 [methodology 8](methodology.md#8-the-timetable-only-describes-the-future).
 
 The whole trip's status is not on this table; join
@@ -545,7 +552,7 @@ rule, not a pipeline one.
 
 | Column | Type | What it means | Where it comes from |
 | --- | --- | --- | --- |
-| `service_date` | `date32[day]` | The service day, Sydney local. | The feed's start date. |
+| `service_date` | `date32[day]` | The service day, Sydney local. | Derived as for `fact_trip_stop`: the feed's start date, moved back a day for a trip first timetabled at 24:00 or later. |
 | `trip_id` | `string` | Which scheduled run. Joins to `dim_trip.trip_id`. | Carried through. |
 | `start_date` | `string` | The feed's own start date, `YYYYMMDD`. | Carried through. |
 | `start_time` | `string` | The feed's start time. | From the hour with the latest poll. |

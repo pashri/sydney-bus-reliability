@@ -11,6 +11,7 @@ import pytest
 
 from compactor.trips import TRIP_SCHEMA
 from merger.merge_sql import build_trip_query
+from tests.merger.test_merge_sql import write_schedule
 
 HOUR: datetime = datetime(2026, 9, 16, 21, 0, tzinfo=UTC)
 
@@ -93,6 +94,7 @@ def merge(
     connection: duckdb.DuckDBPyConnection,
     glob: str,
     service_date: str = '20260917',
+    dim_source: str | None = None,
 ) -> list[dict[str, Any]]:
     """Run the trip merge and return its rows as dicts.
 
@@ -104,6 +106,8 @@ def merge(
         Glob of partials to read.
     service_date : str
         Service date to assemble, as ``YYYYMMDD``.
+    dim_source : str | None
+        Timetable snapshot to consult, or None.
 
     Returns
     -------
@@ -111,7 +115,7 @@ def merge(
         Merged rows.
     """
     result = connection.execute(
-        build_trip_query(),
+        build_trip_query(dim_source=dim_source),
         {
             'partials': glob,
             'service_date': service_date,
@@ -218,8 +222,9 @@ def test_merged_columns_have_fact_types(
         status_row(hour=0), status_row(hour=1),
     ])
     target = tmp_path / 'fact_trip.parquet'
+    query = build_trip_query(dim_source=None)
     _connection.execute(
-        f"COPY ({build_trip_query()}) TO '{target}' (FORMAT PARQUET)",
+        f"COPY ({query}) TO '{target}' (FORMAT PARQUET)",
         {
             'partials': glob,
             'service_date': '20260917',
@@ -232,3 +237,29 @@ def test_merged_columns_have_fact_types(
     for name in ('scheduled_polls', 'canceled_polls', 'added_polls'):
         assert schema.field(name).type == pa.int32(), name
     assert not {'dt', 'hour'} & set(schema.names)
+
+
+def test_trip_timetabled_after_midnight_joins_the_previous_day(
+    _connection: duckdb.DuckDBPyConnection,
+    tmp_path: Path,
+) -> None:
+    """A cancelled 24:30 trip is counted on the day it belongs to."""
+    (tmp_path / 'dim').mkdir()
+    (tmp_path / 'partials').mkdir()
+    glob = write_hours(tmp_path=tmp_path / 'partials', rows=[
+        status_row(hour=0, start_date='20260918', final_status='CANCELED'),
+    ])
+    schedule = write_schedule(
+        tmp_path=tmp_path / 'dim', first_times={'1012281': '24:30:00'},
+    )
+    for service_date, expected in (('20260917', 1), ('20260918', 0)):
+        rows = merge(
+            connection=_connection, glob=glob,
+            service_date=service_date, dim_source=schedule,
+        )
+        assert len(rows) == expected
+    rows = merge(
+        connection=_connection, glob=glob, dim_source=schedule,
+    )
+    assert str(rows[0]['service_date']) == '2026-09-17'
+    assert rows[0]['start_date'] == '20260918'

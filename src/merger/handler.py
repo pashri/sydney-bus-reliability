@@ -434,13 +434,13 @@ DIM_SCHEDULED_STOP_TIME_PREFIX: Final[str] = (
 )
 
 
-def latest_valid_from(
+def valid_from_for(
     *,
     client: Any,
     bucket: str,
     service_date: date,
 ) -> str | None:
-    """Find the schedule snapshot in effect on a service date.
+    """Find the schedule snapshot to use for a service date.
 
     Parameters
     ----------
@@ -455,7 +455,9 @@ def latest_valid_from(
     -------
     str | None
         The latest ``valid_from`` partition value at or before
-        ``service_date``, or None if no snapshot qualifies.
+        ``service_date``. For a day before the first snapshot, the
+        earliest one, with a warning: collection began before the
+        timetable was first captured. None when no snapshot exists.
     """
     pages = client.get_paginator('list_objects_v2').paginate(
         Bucket=bucket,
@@ -469,11 +471,20 @@ def latest_valid_from(
         for page in pages
         for prefix in page.get('CommonPrefixes', ())
     )
+    snapshots: list[str] = sorted(candidates)
     eligible = [
-        value for value in candidates
+        value for value in snapshots
         if date.fromisoformat(value) <= service_date
     ]
-    return max(eligible) if eligible else None
+    if eligible:
+        return eligible[-1]
+    if not snapshots:
+        return None
+    logger.warning(
+        'No snapshot in effect, using the earliest',
+        extra={'valid_from': snapshots[0]},
+    )
+    return snapshots[0]
 
 
 def resolve_dim_source(
@@ -500,10 +511,10 @@ def resolve_dim_source(
     Returns
     -------
     str | None
-        S3 path to the snapshot's Parquet object, or None when no
-        snapshot exists at or before the service date.
+        S3 path to the snapshot's Parquet object, chosen by
+        ``valid_from_for``, or None when no snapshot exists.
     """
-    valid_from = latest_valid_from(
+    valid_from = valid_from_for(
         client=session.client('s3'), bucket=bucket,
         service_date=service_date,
     )
@@ -575,6 +586,7 @@ def merge_trips(
     bucket: str,
     service_date: date,
     window: tuple[datetime, datetime],
+    session: boto3.Session | None = None,
 ) -> int:
     """Fold one service day's trip-status partials into one table.
 
@@ -589,6 +601,9 @@ def merge_trips(
     window : tuple[datetime, datetime]
         UTC range of partials to read, used to bound the partitions
         scanned.
+    session : boto3.Session | None
+        Optional boto3 session, used to list dimension snapshots.
+        Defaults to a new session.
 
     Returns
     -------
@@ -599,9 +614,13 @@ def merge_trips(
         f's3://{bucket}/curated/fact_trip/'
         f'service_date={service_date:%Y-%m-%d}/data.parquet'
     )
+    dim_source = resolve_dim_source(
+        bucket=bucket, service_date=service_date,
+        session=session or boto3.Session(),
+    )
     dt_from, dt_to = partition_bounds(window=window)
     connection.execute(
-        f"COPY ({build_trip_query()}) TO '{target}' "
+        f"COPY ({build_trip_query(dim_source=dim_source)}) TO '{target}' "
         f'(FORMAT PARQUET, COMPRESSION ZSTD)',
         {
             'partials': partial_glob(bucket=bucket, table=MergeTable.TRIP),
@@ -698,7 +717,7 @@ def merge_partial_tables(
     )
     trips = MergeTable.TRIP in tables and merge_trips(
         connection=connection, bucket=bucket, service_date=service_date,
-        window=window,
+        window=window, session=session,
     )
     return int(stops), int(positions), int(trips)
 
