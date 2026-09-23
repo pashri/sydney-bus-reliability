@@ -120,7 +120,11 @@ The live feed does not always say which service day a trip belongs to. A
 trip whose first timetabled time is 24:00 or later is sent with its start
 time wrapped below 24:00 and its start date set to the next calendar date.
 The merger corrects this from the timetable when it builds the `fact_`
-tables, so a `service_date` there is the true service day.
+tables, so a `service_date` there is the true service day. The correction
+needs the trip in the timetable snapshot. A trip missing from it keeps the
+feed's date: rail-replacement runs that are not in the bus bundle, and, for
+days before the first snapshot, trips withdrawn before it was captured.
+Their rows are filed a day late with no `scheduled_arrival_utc`.
 
 ### Facts and dimensions
 
