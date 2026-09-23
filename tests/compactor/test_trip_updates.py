@@ -19,6 +19,7 @@ def build_feed(
     delay: int,
     stamp: int,
     with_vehicle: bool = True,
+    departure_time: int | None = None,
 ) -> object:
     """Build a FeedMessage holding one trip update at one stop.
 
@@ -34,6 +35,9 @@ def build_feed(
         TripUpdate timestamp.
     with_vehicle : bool
         Whether a vehicle descriptor is attached.
+    departure_time : int | None
+        Predicted departure as a Unix timestamp, or None to send no
+        departure.
 
     Returns
     -------
@@ -58,6 +62,8 @@ def build_feed(
     stop.schedule_relationship = relationship
     stop.arrival.time = arrival_time
     stop.arrival.delay = delay
+    if departure_time is not None:
+        stop.departure.time = departure_time
     return feed
 
 
@@ -355,3 +361,67 @@ def test_service_date_comes_from_trip_start_date() -> None:
     )
     batch = next(reducer.batches())
     assert batch.column('service_date').to_pylist() == ['20260917']
+
+
+def test_zero_arrival_time_is_not_a_prediction() -> None:
+    """An explicitly sent arrival time of 0 is read as no arrival.
+
+    The feed blanks the first stop's arrival to 0 once the bus has
+    left, beside a real departure. Read literally it is 1970.
+    """
+    reducer = TripStopReducer()
+    reducer.add(
+        feed=build_feed(
+            relationship=SCHEDULED,
+            arrival_time=0,
+            delay=0,
+            stamp=1789592400,
+            departure_time=1789592460,
+        ),
+        fetched_at=FETCHED,
+    )
+    row = next(reducer.batches()).to_pylist()[0]
+    assert row['final_predicted_arrival_utc'] is None
+    assert row['delay_s'] is None
+    assert row['final_predicted_departure_utc'] == datetime(
+        2026, 9, 16, 21, 1, tzinfo=UTC,
+    )
+
+
+def test_zero_arrival_keeps_the_earlier_arrival() -> None:
+    """A blanked arrival does not erase the last real one.
+
+    The departure from the same later poll still lands.
+    """
+    reducer = TripStopReducer()
+    reducer.add(
+        feed=build_feed(
+            relationship=SCHEDULED,
+            arrival_time=1789592400,
+            delay=120,
+            stamp=1789592300,
+            departure_time=1789592410,
+        ),
+        fetched_at=FETCHED,
+    )
+    reducer.add(
+        feed=build_feed(
+            relationship=SCHEDULED,
+            arrival_time=0,
+            delay=0,
+            stamp=1789592500,
+            departure_time=1789592460,
+        ),
+        fetched_at=FETCHED,
+    )
+    row = next(reducer.batches()).to_pylist()[0]
+    assert row['final_predicted_arrival_utc'] == datetime(
+        2026, 9, 16, 21, 0, tzinfo=UTC,
+    )
+    assert row['delay_s'] == 120
+    assert row['final_predicted_departure_utc'] == datetime(
+        2026, 9, 16, 21, 1, tzinfo=UTC,
+    )
+    assert row['last_update_at_utc'] == datetime(
+        2026, 9, 16, 21, 1, 40, tzinfo=UTC,
+    )

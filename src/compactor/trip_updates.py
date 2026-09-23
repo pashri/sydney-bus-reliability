@@ -87,12 +87,17 @@ def stop_event(*, stop: Any, name: str) -> tuple[Any, Any]:
     Returns
     -------
     tuple[Any, Any]
-        Predicted instant and delay, both None when absent.
+        Predicted instant and delay, both None when absent. A time of
+        0 also reads as absent, delay included: the feed blanks the
+        first stop's arrival to 0 with a delay of 0 once the bus has
+        left, and read literally that is a perfect arrival in 1970.
     """
     if not stop.HasField(name):
         return None, None
     event = getattr(stop, name)
     when = optional_field(message=event, name='time')
+    if when == 0:
+        return None, None
     return (
         None if when is None else datetime.fromtimestamp(when, tz=UTC),
         optional_field(message=event, name='delay'),
@@ -285,6 +290,9 @@ class TripStopReducer:
     ) -> None:
         """Apply a genuine observation, latest-wins.
 
+        An observation with no arrival keeps the row's earlier
+        arrival and its delay, while its departure still lands.
+
         Parameters
         ----------
         row : dict[str, Any]
@@ -299,13 +307,13 @@ class TripStopReducer:
         last = row['last_update_at_utc']
         if last is not None and seen_at < last:
             return
-        arrival, arrival_delay = stop_event(stop=stop, name='arrival')
+        arrival = stop_event(stop=stop, name='arrival')
+        if arrival != (None, None):
+            row['final_predicted_arrival_utc'], row['delay_s'] = arrival
         departure, departure_delay = stop_event(
             stop=stop, name='departure',
         )
         row.update({
-            'final_predicted_arrival_utc': arrival,
-            'delay_s': arrival_delay,
             'final_predicted_departure_utc': departure,
             'departure_delay_s': departure_delay,
             'last_update_at_utc': seen_at,

@@ -497,6 +497,33 @@ def test_delay_without_predicted_arrival_is_not_reliable(
     assert merged['is_reliable'] is False
 
 
+def test_pre_2000_arrival_is_not_reliable(
+    _connection: duckdb.DuckDBPyConnection,
+    tmp_path: Path,
+) -> None:
+    """An arrival at the Unix epoch can never pass as observed.
+
+    Any update time is later than 1970, so the lead test alone would
+    accept it.
+    """
+    row = trip_row(
+        hour=20,
+        n_updates=1,
+        delay=0,
+        last_update=datetime(2026, 9, 16, 20, 30, tzinfo=UTC),
+    )
+    row['final_predicted_arrival_utc'] = datetime(1970, 1, 1, tzinfo=UTC)
+    glob = write_partials(
+        tmp_path=tmp_path, rows=[row], schema=TRIP_STOP_SCHEMA,
+    )
+    result = _connection.execute(
+        TRIP_STOP_MERGE, merge_params(glob=glob),
+    ).fetchall()
+    columns = [d[0] for d in _connection.description]
+    merged = dict(zip(columns, result[0]))
+    assert merged['is_reliable'] is False
+
+
 def test_merged_counter_and_flag_survive_a_parquet_round_trip(
     _connection: duckdb.DuckDBPyConnection,
     tmp_path: Path,

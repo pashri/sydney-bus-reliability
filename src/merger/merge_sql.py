@@ -14,6 +14,9 @@ A prediction that stopped updating more than a minute before the bus
 was due is a forecast, not an observation.
 """
 
+EARLIEST_PLAUSIBLE_ARRIVAL: Final[str] = '2000-01-01 00:00:00+00'
+"""Arrivals before this instant are epoch artefacts, never observations."""
+
 TRIP_STOP_MERGE: Final[str] = f"""
 WITH partials AS (
     SELECT * EXCLUDE (dt, hour)
@@ -80,6 +83,8 @@ SELECT
     COALESCE(
         merged.delay_s IS NOT NULL
         AND NOT merged.lost_tracking
+        AND merged.final_predicted_arrival_utc
+            >= TIMESTAMPTZ '{EARLIEST_PLAUSIBLE_ARRIVAL}'
         AND merged.last_update_at_utc >= (
             merged.final_predicted_arrival_utc
             - INTERVAL '{RELIABLE_LEAD_SECONDS}' SECOND
@@ -118,7 +123,9 @@ columns identical to the partial's own.
 ``is_reliable`` is never NULL. A row can carry a delay with no
 predicted arrival time, and comparing against a missing time yields NULL
 rather than false, so the comparison is wrapped in ``COALESCE``. Nothing
-reading the column has to tell "not reliable" apart from "unknown".
+reading the column has to tell "not reliable" apart from "unknown". An
+arrival before ``EARLIEST_PLAUSIBLE_ARRIVAL`` is never reliable, since
+every update time would pass the lead test against it.
 
 ``n_updates`` is cast back to ``INTEGER``. ``SUM`` widens it to a type
 Parquet has no slot for, which lands in the file as a floating-point
