@@ -151,6 +151,7 @@ def trip_row(
         'final_predicted_departure_utc': None,
         'departure_delay_s': None,
         'last_update_at_utc': last_update,
+        'arrival_updated_at_utc': last_update,
         'n_updates': n_updates,
         'schedule_relationship': 'SCHEDULED',
         'had_vehicle': True,
@@ -991,3 +992,65 @@ def test_shifted_trip_is_scheduled_from_its_service_day(
     assert merged[0]['scheduled_arrival_utc'] == datetime(
         2026, 9, 17, 14, 30, tzinfo=UTC,
     )
+
+
+def test_arrival_carries_forward_from_an_earlier_hour(
+    _connection: duckdb.DuckDBPyConnection,
+    tmp_path: Path,
+) -> None:
+    """A later hour that sent no arrival keeps the earlier hour's."""
+    earlier = trip_row(
+        hour=20, n_updates=3, delay=120,
+        last_update=datetime(2026, 9, 16, 20, 59, tzinfo=UTC),
+    )
+    later = trip_row(
+        hour=21, n_updates=2, delay=0,
+        last_update=datetime(2026, 9, 16, 21, 5, tzinfo=UTC),
+    )
+    later.update({
+        'final_predicted_arrival_utc': None,
+        'delay_s': None,
+        'arrival_updated_at_utc': None,
+    })
+    write_partials(
+        tmp_path=tmp_path, rows=[earlier], schema=TRIP_STOP_SCHEMA,
+        hour='20',
+    )
+    glob = write_partials(
+        tmp_path=tmp_path, rows=[later], schema=TRIP_STOP_SCHEMA,
+        hour='21',
+    )
+    result = _connection.execute(
+        TRIP_STOP_MERGE, merge_params(glob=glob),
+    ).fetchall()
+    merged = dict(zip([d[0] for d in _connection.description], result[0]))
+    assert merged['delay_s'] == 120
+    assert merged['final_predicted_arrival_utc'] == datetime(
+        2026, 9, 17, 0, 0, tzinfo=UTC,
+    )
+    assert merged['arrival_updated_at_utc'] == datetime(
+        2026, 9, 16, 20, 59, tzinfo=UTC,
+    )
+    assert merged['last_update_at_utc'] == datetime(
+        2026, 9, 16, 21, 5, tzinfo=UTC,
+    )
+
+
+def test_arrival_is_judged_by_its_own_update_time(
+    _connection: duckdb.DuckDBPyConnection,
+    tmp_path: Path,
+) -> None:
+    """A later departure-only update cannot make a stale arrival fresh."""
+    row = trip_row(
+        hour=23, n_updates=2, delay=60,
+        last_update=datetime(2026, 9, 17, 0, 5, tzinfo=UTC),
+    )
+    row['arrival_updated_at_utc'] = datetime(2026, 9, 16, 23, 55, tzinfo=UTC)
+    glob = write_partials(
+        tmp_path=tmp_path, rows=[row], schema=TRIP_STOP_SCHEMA, hour='23',
+    )
+    result = _connection.execute(
+        TRIP_STOP_MERGE, merge_params(glob=glob),
+    ).fetchall()
+    merged = dict(zip([d[0] for d in _connection.description], result[0]))
+    assert merged['is_reliable'] is False

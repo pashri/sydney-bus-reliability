@@ -129,6 +129,13 @@ totals AS (
         stop_id,
         stop_sequence,
         CAST(SUM(n_updates) AS INTEGER) AS n_updates,
+        arg_max(
+            struct_pack(
+                at := final_predicted_arrival_utc, delay := delay_s
+            ),
+            arrival_updated_at_utc
+        ) AS arrival,
+        MAX(arrival_updated_at_utc) AS arrival_updated_at_utc,
         BOOL_OR(had_vehicle) AS had_vehicle,
         MAX(last_observed_at_utc) AS final_last_observed_at_utc
     FROM partials
@@ -141,11 +148,12 @@ merged AS (
         latest.stop_id,
         latest.stop_sequence,
         latest.route_id,
-        latest.final_predicted_arrival_utc,
-        latest.delay_s,
+        totals.arrival.at AS final_predicted_arrival_utc,
+        totals.arrival.delay AS delay_s,
         latest.final_predicted_departure_utc,
         latest.departure_delay_s,
         latest.last_update_at_utc,
+        totals.arrival_updated_at_utc,
         totals.n_updates,
         latest.schedule_relationship,
         totals.had_vehicle,
@@ -169,7 +177,7 @@ SELECT
         AND NOT merged.lost_tracking
         AND merged.final_predicted_arrival_utc
             >= TIMESTAMPTZ '{EARLIEST_PLAUSIBLE_ARRIVAL}'
-        AND merged.last_update_at_utc >= (
+        AND merged.arrival_updated_at_utc >= (
             merged.final_predicted_arrival_utc
             - INTERVAL '{RELIABLE_LEAD_SECONDS}' SECOND
         ),
@@ -191,6 +199,12 @@ positions, and both calls must survive the merge.
 ``n_updates`` and ``had_vehicle`` come from a separate aggregate
 subquery joined back to the latest row by key, so the aggregation
 cannot fan out the row count of ``latest``.
+
+The arrival and its delay come from the latest hour that sent an
+arrival, not from the latest hour, since an hour can carry only
+departure updates for a stop. ``is_reliable`` judges the arrival by
+``arrival_updated_at_utc``, when it was last sent, so a later
+departure-only update cannot make a stale arrival look fresh.
 
 ``lost_tracking`` describes the final state of the day, not whether
 any hour ever dropped. It compares the day's latest observation of any
