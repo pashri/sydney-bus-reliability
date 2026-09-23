@@ -30,6 +30,18 @@ STOP_TIMES: str = (
     'shape_dist_traveled\n'
     '"1012281","25:15:00","25:15:30","200013","1","0.00"\n'
 )
+STOP_TIMES_WITH_RULES: str = (
+    'trip_id,arrival_time,departure_time,stop_id,stop_sequence,'
+    'stop_headsign,pickup_type,drop_off_type,shape_dist_traveled,'
+    'timepoint,stop_note\n'
+    '"1012281","06:50:00","06:50:00","231660","1","","0","1","0","1",""\n'
+)
+AGENCY: str = (
+    'agency_id,agency_name,agency_url,agency_timezone,agency_lang,'
+    'agency_phone\n'
+    '"2448","Hunter Valley Buses","http://transportnsw.info",'
+    '"Australia/Sydney","EN",""\n'
+)
 SHAPES: str = (
     'shape_id,shape_pt_lat,shape_pt_lon,shape_pt_sequence,'
     'shape_dist_traveled\n'
@@ -265,3 +277,43 @@ def test_missing_member_raises_key_error_on_consumption() -> None:
 def test_every_dimension_has_a_spec() -> None:
     """No dimension can be added without a schema and transform."""
     assert set(SPECS) == set(Dimension)
+
+
+def test_stop_time_rows_carry_timepoint_and_pickup_rules() -> None:
+    """timepoint and the pickup and drop-off rules are kept as coded."""
+    archive = build_zip(members={'stop_times.txt': STOP_TIMES_WITH_RULES})
+    row = next(dimension_batches(
+        archive=archive,
+        dimension=Dimension.SCHEDULED_STOP_TIME,
+        batch_size=10,
+    )).to_pylist()[0]
+    assert row['timepoint'] == '1'
+    assert row['pickup_type'] == '0'
+    assert row['drop_off_type'] == '1'
+
+
+def test_stop_time_rows_tolerate_missing_rule_columns() -> None:
+    """A bundle without the optional columns reads them as None."""
+    archive = build_zip(members={'stop_times.txt': STOP_TIMES})
+    row = next(dimension_batches(
+        archive=archive,
+        dimension=Dimension.SCHEDULED_STOP_TIME,
+        batch_size=10,
+    )).to_pylist()[0]
+    assert row['timepoint'] is None
+    assert row['pickup_type'] is None
+    assert row['drop_off_type'] is None
+
+
+def test_agency_rows_carry_operator_names() -> None:
+    """dim_agency turns a route's agency_id into an operator name."""
+    archive = build_zip(members={'agency.txt': AGENCY})
+    row = next(dimension_batches(
+        archive=archive, dimension=Dimension.AGENCY, batch_size=10,
+    )).to_pylist()[0]
+    assert row == {
+        'agency_id': '2448',
+        'agency_name': 'Hunter Valley Buses',
+        'agency_url': 'http://transportnsw.info',
+        'agency_timezone': 'Australia/Sydney',
+    }

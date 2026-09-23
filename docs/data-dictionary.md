@@ -31,6 +31,7 @@ describes shape; that one describes trust.
   - [`fact_vehicle_position`](#fact_vehicle_position)
   - [`fact_collector_run`](#fact_collector_run)
 - [Dimensions](#dimensions)
+  - [`dim_agency`](#dim_agency)
   - [`dim_route`](#dim_route)
   - [`dim_trip`](#dim_trip)
   - [`dim_stop`](#dim_stop)
@@ -222,7 +223,8 @@ Everything sits in one S3 bucket, Amazon's flat file store.
       fact_trip/service_date=YYYY-MM-DD/data.parquet
       fact_collector_run/collection_date=YYYY-MM-DD/data.parquet
       dim_route/valid_from=YYYY-MM-DD/data.parquet
-      dim_trip/...                  (and five more dimensions)
+      dim_trip/...                  (and six more dimensions)
+      schedule_bundle/valid_from=YYYY-MM-DD/<bundle filename>.zip
       collector_run/dt=YYYY-MM-DD/<invocation-id>.jsonl
       curation_run/dt=YYYY-MM-DD/<invocation-id>.jsonl
       schedule_check/dt=YYYY-MM-DD/HHMMSS-<invocation-id>.jsonl
@@ -638,8 +640,13 @@ any day can be rebuilt from it - but only until the bucket deletes it after
 
 ## Dimensions
 
-The seven dimensions are the timetable, unpacked out of the GTFS zip into
-one Parquet file each.
+The eight dimensions are the timetable, unpacked out of the GTFS zip into
+one Parquet file each. They keep only some of the zip's columns, so the zip
+itself is archived beside them, at
+`curated/schedule_bundle/valid_from=YYYY-MM-DD/`, named as the server named
+it (`bundle.zip` when it gave no name). A column the dimensions drop can be
+recovered from any snapshot archived since this began, but not from the
+snapshots before it.
 
 They are snapshots, not a history. The loader downloads the bundle once a
 day and writes a new snapshot only when the bundle's contents have changed,
@@ -661,6 +668,18 @@ The bundle covers all of New South Wales and many operators, not just
 Sydney. See [methodology 7](methodology.md#7-the-feeds-cover-the-whole-state-not-just-sydney)
 for the count and what it means for analysis.
 
+### `dim_agency`
+
+**One row is one operator.** From `agency.txt`. Join `dim_route.agency_id`
+to it for operator names.
+
+| Column | Type | What it means | Where it comes from |
+| --- | --- | --- | --- |
+| `agency_id` | `string` | The operator's identifier. The join key. | Copied from `agency.txt`. |
+| `agency_name` | `string` | The operator's name. | Copied. |
+| `agency_url` | `string` | The operator's web address. | Copied. |
+| `agency_timezone` | `string` | The operator's timezone. | Copied. |
+
 ### `dim_route`
 
 **One row is one route**, such as the 333. From `routes.txt`.
@@ -668,7 +687,7 @@ for the count and what it means for analysis.
 | Column | Type | What it means | Where it comes from |
 | --- | --- | --- | --- |
 | `route_id` | `string` | The identifier the live feeds use for this route. The join key. | Copied from `routes.txt`. |
-| `agency_id` | `string` | Which operator runs it. The bundle carries many. | Copied. |
+| `agency_id` | `string` | Which operator runs it. The bundle carries many. Joins to `dim_agency`. | Copied. |
 | `route_short_name` | `string` | The number on the front of the bus, e.g. `333`. | Copied. |
 | `route_long_name` | `string` | The longer descriptive name, where the bundle gives one. | Copied. |
 | `route_type` | `string` | The GTFS code for the kind of service. Kept as text, not converted to a number. Transport for NSW uses the **extended** codes, not the basic ones, so the bus code here is `700` and not `3`. See the table below. | Copied verbatim. |
@@ -745,6 +764,9 @@ not hand you a Sydney filter; you apply one. See
 | `arrival_time` | `string` | Scheduled arrival, as `HH:MM:SS`, **Sydney wall clock, not UTC**. The hour can exceed 24: `25:10:00` means 01:10 the next morning. Kept as written, because resolving it to an instant needs a date. | Copied verbatim. |
 | `departure_time` | `string` | Scheduled departure, same convention. | Copied verbatim. |
 | `shape_dist_traveled` | `double` | How far along the route's drawn path this stop sits, in **metres**, measured from the first point of the shape. | Parsed from text. Null when blank. The unit is TfNSW's answer alone: GTFS lets the publisher choose and asks only that the two files agree, while TfNSW's guide states metres for both. The values are not checked against the shape geometry anywhere in this project. |
+| `timepoint` | `string` | `1` when the time is an exact timetabled time, `0` when it is approximate or interpolated. | Copied verbatim. Null when blank or absent. Not in snapshots written before this column was kept. |
+| `pickup_type` | `string` | Whether passengers can board here: `0` regular, `1` no pickup, `2` phone ahead, `3` arrange with the driver. | Copied verbatim. Null when blank or absent, and in older snapshots. |
+| `drop_off_type` | `string` | Whether passengers can alight here, same codes. | Copied verbatim. Null when blank or absent, and in older snapshots. |
 
 ### `dim_shape`
 

@@ -39,6 +39,7 @@ Record = dict[str, str | float | None]
 class Dimension(StrEnum):
     """A dimension table derived from the static bundle."""
 
+    AGENCY = 'dim_agency'
     STOP = 'dim_stop'
     ROUTE = 'dim_route'
     TRIP = 'dim_trip'
@@ -85,6 +86,28 @@ def stop_record(*, row: Row) -> Record:
         'wheelchair_boarding': (
             row.get('wheelchair_boarding') or None
         ),
+    }
+
+
+def agency_record(*, row: Row) -> Record:
+    """Build one ``dim_agency`` record.
+
+    Parameters
+    ----------
+    row : Row
+        One row of ``agency.txt``.
+
+    Returns
+    -------
+    Record
+        Operator identity and name, joined from ``dim_route`` on
+        ``agency_id``.
+    """
+    return {
+        'agency_id': row['agency_id'],
+        'agency_name': row['agency_name'],
+        'agency_url': row['agency_url'],
+        'agency_timezone': row['agency_timezone'],
     }
 
 
@@ -149,7 +172,9 @@ def stop_time_record(*, row: Row) -> Record:
     Returns
     -------
     Record
-        Scheduled call at one stop.
+        Scheduled call at one stop. ``timepoint``, ``pickup_type`` and
+        ``drop_off_type`` keep their GTFS codes, None when the column
+        is absent or blank.
     """
     return {
         'trip_id': row['trip_id'],
@@ -160,6 +185,9 @@ def stop_time_record(*, row: Row) -> Record:
         'shape_dist_traveled': optional_float(
             value=row['shape_dist_traveled'],
         ),
+        'timepoint': row.get('timepoint') or None,
+        'pickup_type': row.get('pickup_type') or None,
+        'drop_off_type': row.get('drop_off_type') or None,
     }
 
 
@@ -251,6 +279,12 @@ STOP_FIELDS: Final[list[pa.Field[Any]]] = [
     pa.field('wheelchair_boarding', pa.string()),
 ]
 STOP_SCHEMA: Final[pa.Schema] = pa.schema(STOP_FIELDS)
+AGENCY_SCHEMA: Final[pa.Schema] = pa.schema([
+    pa.field('agency_id', pa.string()),
+    pa.field('agency_name', pa.string()),
+    pa.field('agency_url', pa.string()),
+    pa.field('agency_timezone', pa.string()),
+])
 ROUTE_SCHEMA: Final[pa.Schema] = pa.schema([
     pa.field('route_id', pa.string()),
     pa.field('agency_id', pa.string()),
@@ -273,6 +307,9 @@ SCHEDULED_STOP_TIME_FIELDS: Final[list[pa.Field[Any]]] = [
     pa.field('arrival_time', pa.string()),
     pa.field('departure_time', pa.string()),
     pa.field('shape_dist_traveled', pa.float64()),
+    pa.field('timepoint', pa.string()),
+    pa.field('pickup_type', pa.string()),
+    pa.field('drop_off_type', pa.string()),
 ]
 SCHEDULED_STOP_TIME_SCHEMA: Final[pa.Schema] = pa.schema(
     SCHEDULED_STOP_TIME_FIELDS,
@@ -304,6 +341,11 @@ CALENDAR_DATE_SCHEMA: Final[pa.Schema] = pa.schema([
 ])
 
 SPECS: Final[dict[Dimension, DimensionSpec]] = {
+    Dimension.AGENCY: DimensionSpec(
+        member='agency.txt',
+        schema=AGENCY_SCHEMA,
+        transform=agency_record,
+    ),
     Dimension.STOP: DimensionSpec(
         member='stops.txt',
         schema=STOP_SCHEMA,

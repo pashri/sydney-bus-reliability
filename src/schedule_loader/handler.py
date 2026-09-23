@@ -15,6 +15,7 @@ import os
 import zipfile
 from datetime import UTC, datetime
 from http import HTTPStatus
+from pathlib import PurePosixPath
 from typing import Any, Final
 
 import boto3
@@ -36,6 +37,8 @@ TIMEOUT: Final[float] = 120.0  # seconds
 """Seconds. The bundle is about 95 MiB and takes tens of seconds."""
 
 CHECK_PREFIX: Final[str] = 'curated/schedule_check/'
+BUNDLE_PREFIX: Final[str] = 'curated/schedule_bundle/'
+DEFAULT_BUNDLE_NAME: Final[str] = 'bundle.zip'
 
 
 def schedule_check_key(
@@ -182,6 +185,42 @@ def read_hash(*, client: Any, bucket: str, key: str) -> str:
     return record['zip_sha256']
 
 
+def archive_bundle(
+    *,
+    client: Any,
+    bucket: str,
+    bundle: StaticBundle,
+    valid_from: str,
+) -> str:
+    """Store the bundle zip itself beside the snapshot it produced.
+
+    The dimensions keep only some of the bundle's columns. The zip is
+    what lets a column dropped today be recovered later.
+
+    Parameters
+    ----------
+    client : Any
+        A boto3 S3 client.
+    bucket : str
+        Destination bucket.
+    bundle : StaticBundle
+        The downloaded bundle.
+    valid_from : str
+        Partition value, as ``YYYY-MM-DD``.
+
+    Returns
+    -------
+    str
+        S3 key written. Named for the server-supplied filename, cut to
+        its last path segment, or ``DEFAULT_BUNDLE_NAME`` when there is
+        none.
+    """
+    name = PurePosixPath(bundle.filename).name or DEFAULT_BUNDLE_NAME
+    key = f'{BUNDLE_PREFIX}valid_from={valid_from}/{name}'
+    client.put_object(Bucket=bucket, Key=key, Body=bundle.payload)
+    return key
+
+
 def write_dimensions(
     *,
     bundle: StaticBundle,
@@ -296,6 +335,10 @@ def handler(
         logger.info(
             'timetable changed, writing snapshot',
             extra={'valid_from': valid_from},
+        )
+        archive_bundle(
+            client=client, bucket=bucket, bundle=bundle,
+            valid_from=str(valid_from),
         )
         write_dimensions(
             bundle=bundle,
