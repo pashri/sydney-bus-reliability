@@ -32,7 +32,7 @@ import pyarrow as pa
 from aws_lambda_powertools import Logger
 from google.transit import gtfs_realtime_pb2
 
-from common.feed_decode import optional_enum, optional_field
+from common.feed_decode import optional_field
 
 logger = Logger()
 
@@ -64,7 +64,6 @@ TRIP_STOP_FIELDS: Final[list[pa.Field[Any]]] = [
     pa.field('last_update_at_utc', pa.timestamp('s', tz='UTC')),
     pa.field('n_updates', pa.int32()),
     pa.field('schedule_relationship', pa.string()),
-    pa.field('trip_schedule_relationship', pa.string()),
     pa.field('had_vehicle', pa.bool_()),
     pa.field('lost_tracking', pa.bool_()),
     pa.field('last_observed_at_utc', pa.timestamp('s', tz='UTC')),
@@ -233,14 +232,6 @@ class TripStopReducer:
             'last_update_at_utc': None,
             'n_updates': 0,
             'schedule_relationship': None,
-            'trip_schedule_relationship': optional_enum(
-                message=update.trip,
-                name='schedule_relationship',
-                names=(
-                    gtfs_realtime_pb2.TripDescriptor
-                    .ScheduleRelationship.Name
-                ),
-            ),
             'had_vehicle': False,
             'lost_tracking': False,
             'last_observed_at_utc': None,

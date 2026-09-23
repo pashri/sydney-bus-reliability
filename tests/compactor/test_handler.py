@@ -131,6 +131,21 @@ def test_handler_writes_both_partials(_bucket: str) -> None:
     assert record['objects_read'] == 2
 
 
+def test_handler_writes_a_trip_status_partial(_bucket: str) -> None:
+    """Trip-level status lands in its own partial for the hour."""
+    _put_one_hour_of_raw_objects(bucket=_bucket)
+    os.environ['BUCKET_NAME'] = _bucket
+    handler({'hour': '2026-09-16T21:00:00+00:00'}, _Context())
+    listed = boto3.client('s3').list_objects_v2(
+        Bucket=_bucket, Prefix='curated/_partial/',
+    )
+    keys = {item['Key'] for item in listed['Contents']}
+    assert keys == {
+        f'curated/_partial/{table}/dt=2026-09-16/hour=21/data.parquet'
+        for table in ('trip', 'trip_stop', 'vehicle_position')
+    }
+
+
 def test_handler_records_shortfall_without_raising(_bucket: str) -> None:
     """A partial hour is recorded, not raised - gaps are real."""
     _put_one_hour_of_raw_objects(bucket=_bucket)

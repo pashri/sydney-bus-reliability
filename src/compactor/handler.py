@@ -28,6 +28,7 @@ from compactor.positions import (
     position_batches,
 )
 from compactor.trip_updates import TRIP_STOP_SCHEMA, TripStopReducer
+from compactor.trips import TRIP_SCHEMA, TripStatusReducer
 
 logger = Logger()
 
@@ -64,7 +65,7 @@ def partial_key(*, table: str, hour: datetime) -> str:
     Parameters
     ----------
     table : str
-        Either ``vehicle_position`` or ``trip_stop``.
+        One of ``vehicle_position``, ``trip_stop`` or ``trip``.
     hour : datetime
         Start of the hour.
 
@@ -86,7 +87,10 @@ def compact_trip_updates(
     parquet: ParquetRepository,
     hour: datetime,
 ) -> tuple[int, int, int]:
-    """Reduce one hour of trip updates and write the partial.
+    """Reduce one hour of trip updates and write both partials.
+
+    Each poll is decoded once and fed to the stop-level and the
+    trip-level reducer.
 
     Parameters
     ----------
@@ -100,20 +104,25 @@ def compact_trip_updates(
     Returns
     -------
     tuple[int, int, int]
-        Objects read, real observations seen, and rows written.
+        Objects read, real observations seen, and rows written
+        across both partials.
     """
     reducer = TripStopReducer()
+    statuses = TripStatusReducer()
     objects = 0
     for raw in reader.stream_hour(feed=Feed.TRIP_UPDATES, hour=hour):
-        reducer.add(
-            feed=decode_feed(payload=raw.payload),
-            fetched_at=raw.fetched_at,
-        )
+        feed = decode_feed(payload=raw.payload)
+        reducer.add(feed=feed, fetched_at=raw.fetched_at)
+        statuses.add(feed=feed, fetched_at=raw.fetched_at)
         objects += 1
     rows = parquet.put_batches(
         key=partial_key(table='trip_stop', hour=hour),
         schema=TRIP_STOP_SCHEMA,
         batches=reducer.batches(),
+    ) + parquet.put_batches(
+        key=partial_key(table='trip', hour=hour),
+        schema=TRIP_SCHEMA,
+        batches=statuses.batches(),
     )
     return objects, reducer.real_observations, rows
 

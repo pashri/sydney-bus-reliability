@@ -27,10 +27,11 @@ AWS SAM: five Lambdas, two layers and one S3 bucket.
 - `collector`, every minute. Polls vehicle positions every 10 seconds and
   trip updates every 60, and stores the raw protobuf gzipped under `raw/`,
   keyed by actual fetch time
-- `compactor`, hourly at 10 past. Decodes one UTC hour of `raw/` into two
+- `compactor`, hourly at 10 past. Decodes one UTC hour of `raw/` into three
   Parquet partials under `curated/_partial/`
 - `merger`, 08:00 Australia/Sydney. Folds a whole service day of partials
-  into `fact_trip_stop`, `fact_vehicle_position` and `fact_collector_run`.
+  into `fact_trip_stop`, `fact_trip`, `fact_vehicle_position` and
+  `fact_collector_run`.
   Not midnight, and not 04:00 either: a trip can belong to one service day
   while running as late as 06:00 the next morning, so the window it reads
   closes at 07:00 and it has to run after that
@@ -74,7 +75,7 @@ layer step, and nothing to build by hand on a fresh clone.
 ## Re-running a merge
 
 The merger takes two optional event keys, both for re-runs. The scheduled
-event carries neither and assembles all three tables for yesterday.
+event carries neither and assembles every table for yesterday.
 
     aws lambda invoke --function-name sydney-bus-reliability-merger \
       --cli-read-timeout 900 --cli-binary-format raw-in-base64-out \
@@ -86,9 +87,9 @@ default, while the function has 600, so without it a successful merge looks
 like a failed invocation.
 
 `service_date` picks the Sydney service day. `tables` narrows the run to
-`collector_run`, `trip_stop` or `vehicle_position`.
+`collector_run`, `trip`, `trip_stop` or `vehicle_position`.
 
-Narrowing matters for old days. `trip_stop` and `vehicle_position` are built
+Narrowing matters for old days. `trip`, `trip_stop` and `vehicle_position` are built
 from the hourly partials, which expire after 3 days, so a re-run past that
 window has nothing to read. The merger refuses rather than writing an empty
 table over a good one. `collector_run` is folded from the collector's JSONL,
