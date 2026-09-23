@@ -18,6 +18,7 @@ from common.service_day import merge_window
 from common.types_ import RunRecord
 from compactor.positions import POSITION_SCHEMA
 from compactor.trip_updates import TRIP_STOP_SCHEMA
+from compactor.trips import TRIP_SCHEMA
 from merger.handler import (
     DUCKDB_LIMITS,
     MergeTable,
@@ -548,7 +549,6 @@ def test_handler_records_a_short_day(
             ),
             'n_updates': 1,
             'schedule_relationship': 'SCHEDULED',
-            'trip_schedule_relationship': 'SCHEDULED',
             'had_vehicle': True,
             'lost_tracking': False,
             'last_observed_at_utc': datetime(
@@ -590,16 +590,47 @@ def test_handler_records_a_short_day(
         f'curated/_partial/vehicle_position/dt={start:%Y-%m-%d}/'
         f'hour={start:%H}/data.parquet',
     )
+    status_path = f'{tmp_path}/status.parquet'
+    _write_parquet(
+        path=status_path,
+        rows=[{
+            'start_date': '20260917',
+            'trip_id': '1012290',
+            'route_id': '2447_160',
+            'start_time': '07:30:00',
+            'final_status': 'CANCELED',
+            'final_status_at_utc': start,
+            'scheduled_polls': 0,
+            'canceled_polls': 1,
+            'added_polls': 0,
+            'first_seen_at_utc': start,
+            'last_seen_at_utc': start,
+            'first_canceled_at_utc': start,
+            'last_canceled_at_utc': start,
+            'had_vehicle': False,
+        }],
+        schema=TRIP_SCHEMA,
+    )
+    client.upload_file(
+        status_path, _bucket,
+        f'curated/_partial/trip/dt={start:%Y-%m-%d}/'
+        f'hour={start:%H}/data.parquet',
+    )
     os.environ['BUCKET_NAME'] = _bucket
     record = handler(
         {'service_date': '2026-09-17'}, _Context(),
         endpoint=_s3_endpoint,
     )
     assert record['job'] == 'merger'
-    assert record['rows_out'] == 3
+    assert record['rows_out'] == 4
     assert record['error'] is None
     assert record['objects_expected'] > record['objects_read']
-    assert record['objects_read'] == 2
+    assert record['objects_read'] == 3
+    fact = pq.read_table(io.BytesIO(client.get_object(
+        Bucket=_bucket,
+        Key='curated/fact_trip/service_date=2026-09-17/data.parquet',
+    )['Body'].read()))
+    assert fact.column('final_status').to_pylist() == ['CANCELED']
 
 
 def test_merge_trip_stops_resolves_scheduled_arrival(
@@ -660,7 +691,6 @@ def test_merge_trip_stops_resolves_scheduled_arrival(
                     'last_update_at_utc': last_update,
                     'n_updates': 1,
                     'schedule_relationship': 'SCHEDULED',
-                    'trip_schedule_relationship': 'SCHEDULED',
                     'had_vehicle': True,
                     'lost_tracking': False,
                     'last_observed_at_utc': last_update,
@@ -678,7 +708,6 @@ def test_merge_trip_stops_resolves_scheduled_arrival(
                     'last_update_at_utc': last_update,
                     'n_updates': 1,
                     'schedule_relationship': 'SCHEDULED',
-                    'trip_schedule_relationship': 'SCHEDULED',
                     'had_vehicle': True,
                     'lost_tracking': False,
                     'last_observed_at_utc': last_update,

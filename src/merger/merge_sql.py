@@ -20,7 +20,9 @@ EARLIEST_PLAUSIBLE_ARRIVAL: Final[str] = '2000-01-01 00:00:00+00'
 TRIP_STOP_MERGE: Final[str] = f"""
 WITH partials AS (
     SELECT * EXCLUDE (dt, hour)
-    FROM read_parquet($partials, hive_partitioning = true)
+    FROM read_parquet(
+        $partials, hive_partitioning = true, union_by_name = true
+    )
     WHERE dt >= $dt_from
       AND dt <= $dt_to
       AND service_date = $service_date
@@ -63,7 +65,6 @@ merged AS (
         latest.last_update_at_utc,
         totals.n_updates,
         latest.schedule_relationship,
-        latest.trip_schedule_relationship,
         totals.had_vehicle,
         (
             latest.last_update_at_utc IS NOT NULL
@@ -119,6 +120,10 @@ footers are read. They do not select the service day, which
 every day ever collected. ``dt`` and ``hour`` come from the partition
 path rather than the data, so they are excluded to keep the merged
 columns identical to the partial's own.
+
+Partials are read by column name, so an hour written before a column
+was added or retired still merges with a later one. Only the columns
+listed in ``merged`` reach the fact.
 
 ``is_reliable`` is never NULL. A row can carry a delay with no
 predicted arrival time, and comparing against a missing time yields NULL
@@ -206,6 +211,67 @@ def build_trip_stop_query(*, dim_source: str | None) -> str:
     FROM day_merge
     {join}
     ORDER BY day_merge.route_id, day_merge.trip_id, day_merge.stop_sequence
+    """
+
+
+TRIP_MERGE: Final[str] = """
+WITH partials AS (
+    SELECT * EXCLUDE (dt, hour)
+    FROM read_parquet(
+        $partials, hive_partitioning = true, union_by_name = true
+    )
+    WHERE dt >= $dt_from
+      AND dt <= $dt_to
+      AND start_date = $service_date
+)
+SELECT
+    start_date AS service_date,
+    trip_id,
+    start_date,
+    arg_max(start_time, last_seen_at_utc) AS start_time,
+    arg_max(route_id, last_seen_at_utc) AS route_id,
+    arg_max(final_status, final_status_at_utc) AS final_status,
+    MAX(final_status_at_utc) AS final_status_at_utc,
+    CAST(SUM(scheduled_polls) AS INTEGER) AS scheduled_polls,
+    CAST(SUM(canceled_polls) AS INTEGER) AS canceled_polls,
+    CAST(SUM(added_polls) AS INTEGER) AS added_polls,
+    MIN(first_seen_at_utc) AS first_seen_at_utc,
+    MAX(last_seen_at_utc) AS last_seen_at_utc,
+    MIN(first_canceled_at_utc) AS first_canceled_at_utc,
+    MAX(last_canceled_at_utc) AS last_canceled_at_utc,
+    BOOL_OR(had_vehicle) AS had_vehicle
+FROM partials
+GROUP BY start_date, trip_id
+"""
+"""Merge hourly trip-status partials into one row per service-day trip.
+
+Each partial covers the polls fetched in its own hour, so no poll is
+counted twice: counts are summed, spans widened, and the final status
+taken from the hour holding the latest status poll. ``arg_max`` skips
+NULL arguments, so an hour whose trip carried no status never
+overrides one that did.
+"""
+
+
+def build_trip_query() -> str:
+    """Build the query assembling ``fact_trip`` for one service day.
+
+    Returns
+    -------
+    str
+        ``TRIP_MERGE`` with ``service_date`` converted to a date, so
+        it matches the ``service_date=`` partition it is written under,
+        sorted by route and trip.
+    """
+    return f"""
+    WITH day_merge AS (
+        {TRIP_MERGE}
+    )
+    SELECT day_merge.* REPLACE (
+        strptime(day_merge.service_date, '%Y%m%d')::DATE AS service_date
+    )
+    FROM day_merge
+    ORDER BY day_merge.route_id, day_merge.trip_id
     """
 
 

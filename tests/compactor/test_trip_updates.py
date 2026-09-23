@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 
 from google.transit import gtfs_realtime_pb2
 
-from compactor.trip_updates import TripStopReducer
+from compactor.trip_updates import TRIP_STOP_SCHEMA, TripStopReducer
 
 FETCHED: datetime = datetime(2026, 9, 16, 21, 0, 34, tzinfo=UTC)
 SCHEDULED = gtfs_realtime_pb2.TripUpdate.StopTimeUpdate.SCHEDULED
@@ -425,3 +425,8 @@ def test_zero_arrival_keeps_the_earlier_arrival() -> None:
     assert row['last_update_at_utc'] == datetime(
         2026, 9, 16, 21, 1, 40, tzinfo=UTC,
     )
+
+
+def test_stop_rows_do_not_carry_trip_status() -> None:
+    """Trip status lives in the trip partial alone."""
+    assert 'trip_schedule_relationship' not in TRIP_STOP_SCHEMA.names

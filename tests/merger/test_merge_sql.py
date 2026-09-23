@@ -152,7 +152,6 @@ def trip_row(
         'last_update_at_utc': last_update,
         'n_updates': n_updates,
         'schedule_relationship': 'SCHEDULED',
-        'trip_schedule_relationship': 'SCHEDULED',
         'had_vehicle': True,
         'lost_tracking': False,
         'last_observed_at_utc': last_observed or last_update,
@@ -597,6 +596,45 @@ def test_merged_columns_keep_the_partial_types(
             assert pa.types.is_timestamp(stored), field.name
         else:
             assert stored == field.type, field.name
+
+
+def test_partials_with_a_retired_column_still_merge(
+    _connection: duckdb.DuckDBPyConnection,
+    tmp_path: Path,
+) -> None:
+    """An hour written before trip status moved out merges with a later one.
+
+    Partials written before the change still carry
+    ``trip_schedule_relationship``. The column is not merged.
+    """
+    legacy_schema = TRIP_STOP_SCHEMA.append(
+        pa.field('trip_schedule_relationship', pa.string()),
+    )
+    legacy = trip_row(
+        hour=20, n_updates=1, delay=60,
+        last_update=datetime(2026, 9, 16, 20, 30, tzinfo=UTC),
+    )
+    legacy['trip_schedule_relationship'] = 'SCHEDULED'
+    write_partials(
+        tmp_path=tmp_path, rows=[legacy], schema=legacy_schema, hour='20',
+    )
+    glob = write_partials(
+        tmp_path=tmp_path,
+        rows=[trip_row(
+            hour=21, n_updates=2, delay=90,
+            last_update=datetime(2026, 9, 16, 21, 30, tzinfo=UTC),
+        )],
+        schema=TRIP_STOP_SCHEMA,
+        hour='21',
+    )
+    result = _connection.execute(
+        TRIP_STOP_MERGE, merge_params(glob=glob),
+    ).fetchall()
+    columns = [d[0] for d in _connection.description]
+    merged = dict(zip(columns, result[0]))
+    assert merged['n_updates'] == 3
+    assert merged['delay_s'] == 90
+    assert 'trip_schedule_relationship' not in columns
 
 
 def test_hive_partition_columns_are_not_merged_in(

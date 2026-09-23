@@ -26,7 +26,11 @@ from common.curation import CurationRepository
 from common.process import peak_rss_mb
 from common.service_day import merge_window, service_date_for
 from common.types_ import CurationJob, CurationRecord
-from merger.merge_sql import POSITION_MERGE, build_trip_stop_query
+from merger.merge_sql import (
+    POSITION_MERGE,
+    build_trip_query,
+    build_trip_stop_query,
+)
 
 logger = Logger()
 
@@ -46,12 +50,13 @@ class MergeTable(StrEnum):
     """One of the tables a merge run can assemble."""
 
     COLLECTOR_RUN = 'collector_run'
+    TRIP = 'trip'
     TRIP_STOP = 'trip_stop'
     VEHICLE_POSITION = 'vehicle_position'
 
 
 FROM_PARTIALS: Final[frozenset[MergeTable]] = frozenset({
-    MergeTable.TRIP_STOP, MergeTable.VEHICLE_POSITION,
+    MergeTable.TRIP, MergeTable.TRIP_STOP, MergeTable.VEHICLE_POSITION,
 })
 """Tables assembled from the hourly partials.
 
@@ -237,7 +242,7 @@ def partial_glob(*, bucket: str, table: str) -> str:
     bucket : str
         Bucket holding the curated layer.
     table : str
-        Either ``vehicle_position`` or ``trip_stop``.
+        One of ``vehicle_position``, ``trip_stop`` or ``trip``.
 
     Returns
     -------
@@ -361,7 +366,7 @@ def count_existing_partials(
     bucket : str
         Bucket holding the curated layer.
     table : str
-        Either ``vehicle_position`` or ``trip_stop``.
+        One of ``vehicle_position``, ``trip_stop`` or ``trip``.
     expected : set[datetime]
         Hours the merge window covers, from ``expected_hours``.
 
@@ -408,8 +413,9 @@ def count_partial_coverage(
     Returns
     -------
     tuple[int, int]
-        ``objects_expected`` (hours in the window, times two tables)
-        and ``objects_read`` (how many of those actually exist).
+        ``objects_expected`` (hours in the window, times the tables
+        built from partials) and ``objects_read`` (how many of those
+        actually exist).
     """
     hours = expected_hours(window=window)
     expected = set(hours)
@@ -418,9 +424,9 @@ def count_partial_coverage(
         count_existing_partials(
             client=client, bucket=bucket, table=table, expected=expected,
         )
-        for table in ('trip_stop', 'vehicle_position')
+        for table in FROM_PARTIALS
     )
-    return len(hours) * 2, read
+    return len(hours) * len(FROM_PARTIALS), read
 
 
 DIM_SCHEDULED_STOP_TIME_PREFIX: Final[str] = (
@@ -563,6 +569,50 @@ def merge_trip_stops(
     return count_parquet_rows(connection=connection, target=target)
 
 
+def merge_trips(
+    *,
+    connection: duckdb.DuckDBPyConnection,
+    bucket: str,
+    service_date: date,
+    window: tuple[datetime, datetime],
+) -> int:
+    """Fold one service day's trip-status partials into one table.
+
+    Parameters
+    ----------
+    connection : duckdb.DuckDBPyConnection
+        Configured DuckDB connection.
+    bucket : str
+        Bucket holding the curated layer.
+    service_date : date
+        The Sydney service date being assembled.
+    window : tuple[datetime, datetime]
+        UTC range of partials to read, used to bound the partitions
+        scanned.
+
+    Returns
+    -------
+    int
+        Rows written.
+    """
+    target = (
+        f's3://{bucket}/curated/fact_trip/'
+        f'service_date={service_date:%Y-%m-%d}/data.parquet'
+    )
+    dt_from, dt_to = partition_bounds(window=window)
+    connection.execute(
+        f"COPY ({build_trip_query()}) TO '{target}' "
+        f'(FORMAT PARQUET, COMPRESSION ZSTD)',
+        {
+            'partials': partial_glob(bucket=bucket, table=MergeTable.TRIP),
+            'service_date': f'{service_date:%Y%m%d}',
+            'dt_from': dt_from,
+            'dt_to': dt_to,
+        },
+    )
+    return count_parquet_rows(connection=connection, target=target)
+
+
 def merge_positions(
     *,
     connection: duckdb.DuckDBPyConnection,
@@ -608,6 +658,51 @@ def merge_positions(
     return count_parquet_rows(connection=connection, target=target)
 
 
+def merge_partial_tables(
+    *,
+    connection: duckdb.DuckDBPyConnection,
+    bucket: str,
+    service_date: date,
+    tables: frozenset[MergeTable],
+    session: boto3.Session,
+) -> tuple[int, ...]:
+    """Assemble every requested table that is built from partials.
+
+    Parameters
+    ----------
+    connection : duckdb.DuckDBPyConnection
+        Configured DuckDB connection.
+    bucket : str
+        Bucket holding the curated layer.
+    service_date : date
+        The Sydney service date being assembled.
+    tables : frozenset[MergeTable]
+        Tables requested for this run.
+    session : boto3.Session
+        Session used to list dimension snapshots.
+
+    Returns
+    -------
+    tuple[int, ...]
+        Rows written to ``fact_trip_stop``, ``fact_vehicle_position``
+        and ``fact_trip``, zero for a table not requested.
+    """
+    window = merge_window(service_date=service_date)
+    stops = MergeTable.TRIP_STOP in tables and merge_trip_stops(
+        connection=connection, bucket=bucket, service_date=service_date,
+        window=window, session=session,
+    )
+    positions = MergeTable.VEHICLE_POSITION in tables and merge_positions(
+        connection=connection, bucket=bucket, service_date=service_date,
+        window=window,
+    )
+    trips = MergeTable.TRIP in tables and merge_trips(
+        connection=connection, bucket=bucket, service_date=service_date,
+        window=window,
+    )
+    return int(stops), int(positions), int(trips)
+
+
 def count_parquet_rows(
     *,
     connection: duckdb.DuckDBPyConnection,
@@ -638,7 +733,7 @@ def build_record(
     context: LambdaContext,
     started: datetime,
     service_date: date,
-    rows_written: tuple[int, int, int],
+    rows_written: tuple[int, ...],
     partial_coverage: tuple[int, int],
 ) -> CurationRecord:
     """Assemble one invocation's audit record.
@@ -651,9 +746,8 @@ def build_record(
         UTC instant the invocation began.
     service_date : date
         The Sydney service date assembled.
-    rows_written : tuple[int, int, int]
-        Rows written to ``fact_collector_run``, ``fact_trip_stop`` and
-        ``fact_vehicle_position``, respectively.
+    rows_written : tuple[int, ...]
+        Rows written to each table assembled.
     partial_coverage : tuple[int, int]
         ``objects_expected`` and ``objects_read``, from
         ``count_partial_coverage``.
@@ -749,7 +843,7 @@ def handler(
         EventBridge event, optionally carrying a ``service_date``
         override and a ``tables`` list naming which tables to
         assemble. Both are for re-runs; the scheduled event carries
-        neither and assembles all three for yesterday.
+        neither and assembles every table for yesterday.
     context : LambdaContext
         Lambda context, used for the invocation id.
     endpoint : str | None
@@ -789,21 +883,13 @@ def handler(
             bucket=bucket, service_date=service_date, endpoint=endpoint,
             session=session,
         )
-    trip_rows = 0
-    if MergeTable.TRIP_STOP in tables:
-        trip_rows = merge_trip_stops(
-            connection=connection, bucket=bucket,
-            service_date=service_date, window=window, session=session,
-        )
-    position_rows = 0
-    if MergeTable.VEHICLE_POSITION in tables:
-        position_rows = merge_positions(
-            connection=connection, bucket=bucket,
-            service_date=service_date, window=window,
-        )
+    partial_rows = merge_partial_tables(
+        connection=connection, bucket=bucket, service_date=service_date,
+        tables=tables, session=session,
+    )
     record = build_record(
         context=context, started=started, service_date=service_date,
-        rows_written=(collector_rows, trip_rows, position_rows),
+        rows_written=(collector_rows, *partial_rows),
         partial_coverage=coverage,
     )
     CurationRepository(bucket=bucket, session=session).put_record(

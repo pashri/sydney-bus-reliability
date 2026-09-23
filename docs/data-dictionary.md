@@ -24,8 +24,10 @@ describes shape; that one describes trust.
 - [Hourly intermediates](#hourly-intermediates)
   - [`curated/_partial/vehicle_position/`](#curated_partialvehicle_position)
   - [`curated/_partial/trip_stop/`](#curated_partialtrip_stop)
+  - [`curated/_partial/trip/`](#curated_partialtrip)
 - [Service-day facts](#service-day-facts)
   - [`fact_trip_stop`](#fact_trip_stop)
+  - [`fact_trip`](#fact_trip)
   - [`fact_vehicle_position`](#fact_vehicle_position)
   - [`fact_collector_run`](#fact_collector_run)
 - [Dimensions](#dimensions)
@@ -185,7 +187,7 @@ entry says so and names both. Where there is no measurement, the guide
 stands unopposed.
 
 **Unrecognised codes.** Most coded fields - `occupancy_status`,
-`current_status`, `congestion_level`, `trip_schedule_relationship`, and
+`current_status`, `congestion_level`, `fact_trip`'s `final_status`, and
 `vehicle_position`'s `schedule_relationship` - read as null if Transport
 for NSW ever sends a value outside the published list. The original value
 is not preserved anywhere.
@@ -208,8 +210,10 @@ Everything sits in one S3 bucket, Amazon's flat file store.
     curated/
       _partial/vehicle_position/dt=YYYY-MM-DD/hour=HH/data.parquet
       _partial/trip_stop/dt=YYYY-MM-DD/hour=HH/data.parquet
+      _partial/trip/dt=YYYY-MM-DD/hour=HH/data.parquet
       fact_vehicle_position/service_date=YYYY-MM-DD/data.parquet
       fact_trip_stop/service_date=YYYY-MM-DD/data.parquet
+      fact_trip/service_date=YYYY-MM-DD/data.parquet
       fact_collector_run/collection_date=YYYY-MM-DD/data.parquet
       dim_route/valid_from=YYYY-MM-DD/data.parquet
       dim_trip/...                  (and five more dimensions)
@@ -245,7 +249,7 @@ need one hour.
 Four jobs write all of it, and the rest of this document names them:
 
 - the **collector** polls both live feeds and writes `raw/`, every minute
-- the **compactor** turns one hour of `raw/` into two files under `_partial/`
+- the **compactor** turns one hour of `raw/` into three files under `_partial/`
 - the **merger** folds a service day of `_partial/` into the `fact_` tables
 - the **schedule loader** downloads the timetable and writes the dimensions
 
@@ -322,7 +326,7 @@ Dataset page:
 | `trip_update.trip.start_date` | `string` | The service day this trip belongs to, as `YYYYMMDD`, Sydney local. Authoritative: a trip running past midnight keeps the date it started under. | Read directly, so an unsent value reads as `''`. |
 | `trip_update.trip.trip_id` | `string` | Which scheduled run this is. Joins to `dim_trip`. | Populated. |
 | `trip_update.trip.route_id` | `string` | Which route. Joins to `dim_route`. | Populated. |
-| `trip_update.trip.schedule_relationship` | `enum` | Whether the whole trip is running as timetabled. `CANCELED` here means the trip is cancelled, and it is a different thing from `NO_DATA` on a stop. See [methodology 4](methodology.md#4-no_data-does-not-mean-cancelled). | Read only when sent. |
+| `trip_update.trip.schedule_relationship` | `enum` | Whether the whole trip is running as timetabled. `CANCELED` here means the trip is cancelled, and it is a different thing from `NO_DATA` on a stop. See [methodology 4](methodology.md#4-no_data-does-not-mean-cancelled). | Read only when sent. A `CANCELED` update carries only the trip descriptor: no stop-time updates, no vehicle and no timestamp. A trip can be cancelled and later reinstated. |
 | `trip_update.timestamp` | `uint64` | When Transport for NSW last refreshed this trip. Unix epoch seconds, UTC. | **Often absent.** When it is, the pipeline falls back to the time the poll was issued. |
 | `trip_update.vehicle` | message | Presence alone is read, not the contents: it says whether a bus was assigned to this trip at all. | Roughly 3% of trips that should be underway carry no vehicle. See [methodology 5](methodology.md#5-about-3-of-running-trips-report-no-bus-at-all). |
 | `trip_update.stop_time_update.stop_id` | `string` | Which stop this prediction is for. Joins to `dim_stop`. | Read directly, so an unsent value reads as `''`. |
@@ -341,7 +345,7 @@ Not read from this feed: `trip_update.delay` (the trip-level summary),
 
 ## Hourly intermediates
 
-Each hour, the compactor reads that hour of raw objects and writes two
+Each hour, the compactor reads that hour of raw objects and writes three
 Parquet files. This is where the binary feeds first become queryable.
 
 These files are working state. They are deleted after 3 days, and each holds
@@ -412,7 +416,6 @@ Among real observations, the latest wins.
 | `last_update_at_utc` | `timestamp[s, tz=UTC]` | When the last **real** observation for this stop was made. | `trip_update.timestamp` when the feed sent one, otherwise the poll time. Null when this stop was only ever echoed. |
 | `n_updates` | `int32` | How many real observations landed for this stop during this hour. Echoes are not counted, so `0` means the stop was listed but never genuinely reported on. | Counted during the reduction. Never null. |
 | `schedule_relationship` | `string` | What the feed last said about this stop: `SCHEDULED`, `SKIPPED`, `NO_DATA` or `UNSCHEDULED`. | The latest real observation's value once one exists; before that, whatever was last seen, including `NO_DATA`. Read without first asking whether the field was sent, so a value outside the list, or no value at all, reads as `SCHEDULED`. Set on the stop's first sighting, so never null. |
-| `trip_schedule_relationship` | `string` | What the feed said about the whole trip, e.g. `SCHEDULED`, `CANCELED`. Separate from the stop's own status. | Copied from `trip_update.trip.schedule_relationship`, taken when the row was first created. Null when not sent or not recognised. |
 | `had_vehicle` | `bool` | True if a bus was ever attached to this trip during the hour. | True once any poll carried `trip_update.vehicle`, and it never goes back to false. Never null. |
 | `lost_tracking` | `bool` | True when the bus went quiet part-way: a real observation landed, and then only echoes followed. The prediction is frozen at whatever it last said. | Computed at write time: true when `last_observed_at_utc` is later than `last_update_at_utc`. False when neither exists, because a stop that was never reported on was not lost. |
 | `last_observed_at_utc` | `timestamp[s, tz=UTC]` | When this stop was last mentioned by the feed at all, echo or not. Bookkeeping for `lost_tracking`. | The latest observation time of any kind. Null only if the row was somehow never observed. **Not carried into `fact_trip_stop`** - it is folded into `lost_tracking` there. |
@@ -421,6 +424,49 @@ The two timestamps come from different clocks:
 `last_update_at_utc` prefers the feed's own stamp, `last_observed_at_utc`
 often falls back to poll time. That does not change which value is last -
 see [methodology 13](methodology.md#13-lost_tracking-compares-two-different-clocks).
+
+Trip-level status is not on these rows. It is in
+[`curated/_partial/trip/`](#curated_partialtrip).
+
+Partials written before trip status moved out still carry a
+`trip_schedule_relationship` column. The merger reads partials by column
+name and never carries it into the fact.
+
+### `curated/_partial/trip/`
+
+**One row is one trip on one feed start date, reduced to what that hour's
+polls said about the whole trip.**
+
+Written from every trip update, including the ones with no stop-time
+updates. That is the only place a `CANCELED` trip appears, because a
+cancelled trip update carries no stops. Updates with an empty `trip_id`
+(the feed's `UNSCHEDULED` runs) cannot be keyed and are skipped.
+
+Every time on this row is the **poll's fetch time**, since cancelled
+updates carry no timestamp of their own.
+
+The key is not unique within one poll. An `ADDED` update can share its
+`trip_id` and start date with a `SCHEDULED` one, so a status is counted at
+most once per poll, and when one poll reports a trip under more than one
+status the final status is chosen by rank - `CANCELED`, then `SCHEDULED`,
+then `ADDED`, then anything else - never by message order.
+
+| Column | Type | What it means | Where it comes from |
+| --- | --- | --- | --- |
+| `start_date` | `string` | The feed's start date, as `YYYYMMDD`. | Copied from `trip_update.trip.start_date`. |
+| `trip_id` | `string` | Which scheduled run. Joins to `dim_trip.trip_id`. | Copied from `trip_update.trip.trip_id`. Never `''`: such updates are skipped. |
+| `route_id` | `string` | Which route. | From the latest poll in the hour. |
+| `start_time` | `string` | The feed's start time, `HH:MM:SS`. Never above 23:59:59. | From the latest poll in the hour. |
+| `final_status` | `string` | The trip-level status in the hour's latest poll: `SCHEDULED`, `CANCELED`, `ADDED`, ... | `trip_update.trip.schedule_relationship`, by name. Null when never sent. |
+| `final_status_at_utc` | `timestamp[s, tz=UTC]` | Fetch time of the poll `final_status` came from. | Null when `final_status` is. |
+| `scheduled_polls` | `int32` | Polls this hour that reported the trip `SCHEDULED`. | Counted once per poll. Never null. |
+| `canceled_polls` | `int32` | Polls this hour that reported it `CANCELED`. | Counted once per poll. Never null. |
+| `added_polls` | `int32` | Polls this hour that reported it `ADDED`. | Counted once per poll. Never null. |
+| `first_seen_at_utc` | `timestamp[s, tz=UTC]` | First poll this hour that mentioned the trip at all. | Never null. |
+| `last_seen_at_utc` | `timestamp[s, tz=UTC]` | Last poll this hour that mentioned it. | Never null. |
+| `first_canceled_at_utc` | `timestamp[s, tz=UTC]` | First poll this hour that reported it `CANCELED`. | Null when none did. |
+| `last_canceled_at_utc` | `timestamp[s, tz=UTC]` | Last poll this hour that reported it `CANCELED`. | Null when none did. |
+| `had_vehicle` | `bool` | True if any update this hour carried a vehicle. | Never null. |
 
 ---
 
@@ -465,7 +511,6 @@ measured.
 | `last_update_at_utc` | `timestamp[us, tz=UTC]` | When the day's last real observation was made. How fresh `delay_s` is. | Same source row. Null when the stop was only ever echoed. |
 | `n_updates` | `int32` | Real observations across the whole day. `0` means the stop was listed but never genuinely reported on. | Summed over every hour, not taken from the last one, so it does not depend on file read order. Never null. |
 | `schedule_relationship` | `string` | This stop's status: `SCHEDULED`, `SKIPPED`, `NO_DATA`, `UNSCHEDULED`. | From the most recent hour's row. |
-| `trip_schedule_relationship` | `string` | The whole trip's status, e.g. `CANCELED`. Not the same thing as the column above - see [methodology 4](methodology.md#4-no_data-does-not-mean-cancelled). | From the most recent hour's row. |
 | `had_vehicle` | `bool` | True if a bus was attached to this trip at any point in the day. | True if any hour said so. Never null. |
 | `lost_tracking` | `bool` | True when the bus stopped reporting before reaching this stop and only echoes followed. The prediction is stale. | Recomputed for the whole day: true when the day's latest observation of any kind is later than its latest real one. False when there was never a real observation. Never null. |
 | `is_reliable` | `bool` | True when the arrival time is worth trusting: a real delay exists, tracking did not drop, the arrival is after 2000 (never an epoch artefact), and the last update landed no more than 60 seconds before the predicted arrival. **Headline figures use only rows where this is true.** | Computed. False when any condition fails, including when a delay exists but no predicted arrival time does, leaving nothing to compare against. Never null. The 60-second rule is explained in [methodology 1](methodology.md#1-arrival-times-are-predictions-not-observations). |
@@ -474,6 +519,47 @@ measured.
 Days before the first timetable was captured have live data and no schedule
 to compare it to, so `scheduled_arrival_utc` is null throughout them. See
 [methodology 8](methodology.md#8-the-timetable-only-describes-the-future).
+
+The whole trip's status is not on this table; join
+[`fact_trip`](#fact_trip) on `service_date` and `trip_id`. Stop rows of a
+trip cancelled part-way through are kept: the stops it reached before the
+cancellation are real, and later stops' frozen predictions already fail
+`is_reliable`.
+
+A known limit: an `ADDED` trip update sharing a `trip_id` and start date
+with a `SCHEDULED` one in the same poll is folded into the same stop rows.
+
+### `fact_trip`
+
+**One row is one trip on one service day, as the feed reported it.** Use
+it to tell a cancelled trip from one that ran, or one the feed never
+mentioned (absent from this table, present in the timetable).
+
+Written to `curated/fact_trip/service_date=YYYY-MM-DD/data.parquet`.
+
+Status is stored as evidence, not as a verdict. A trip can be cancelled and
+later reinstated, and a cancellation can last one poll or several hours, so
+the table keeps the final status, the poll counts per status and the span
+of the cancellation. Which of these counts as "cancelled" is an analysis
+rule, not a pipeline one.
+
+| Column | Type | What it means | Where it comes from |
+| --- | --- | --- | --- |
+| `service_date` | `date32[day]` | The service day, Sydney local. | The feed's start date. |
+| `trip_id` | `string` | Which scheduled run. Joins to `dim_trip.trip_id`. | Carried through. |
+| `start_date` | `string` | The feed's own start date, `YYYYMMDD`. | Carried through. |
+| `start_time` | `string` | The feed's start time. | From the hour with the latest poll. |
+| `route_id` | `string` | Which route. | From the hour with the latest poll. |
+| `final_status` | `string` | The status in the day's latest poll that sent one. | From the hour with the latest `final_status_at_utc`. Null when never sent. |
+| `final_status_at_utc` | `timestamp[us, tz=UTC]` | Fetch time of that poll. | Latest over every hour. |
+| `scheduled_polls` | `int32` | Polls in the day reporting `SCHEDULED`. | Summed over every hour. Never null. |
+| `canceled_polls` | `int32` | Polls reporting `CANCELED`. Above 0 means the trip was cancelled at some point, whatever its final status. | Summed. Never null. |
+| `added_polls` | `int32` | Polls reporting `ADDED`. | Summed. Never null. |
+| `first_seen_at_utc` | `timestamp[us, tz=UTC]` | First poll mentioning the trip. | Earliest over every hour. |
+| `last_seen_at_utc` | `timestamp[us, tz=UTC]` | Last poll mentioning it. A cancelled trip stays listed until about its scheduled end. | Latest over every hour. |
+| `first_canceled_at_utc` | `timestamp[us, tz=UTC]` | First poll reporting `CANCELED`. | Earliest over every hour. Null when never cancelled. |
+| `last_canceled_at_utc` | `timestamp[us, tz=UTC]` | Last poll reporting `CANCELED`. | Latest over every hour. Null when never cancelled. |
+| `had_vehicle` | `bool` | True if a bus was attached at any point in the day. A reinstated trip with a vehicle ran. | True if any hour said so. Never null. |
 
 ### `fact_vehicle_position`
 
