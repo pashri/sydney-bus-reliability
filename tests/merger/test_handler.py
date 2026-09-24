@@ -673,7 +673,7 @@ def test_merge_trip_stops_resolves_scheduled_arrival(
     )
     client.upload_file(
         dim_path, _bucket,
-        'curated/dim_scheduled_stop_time/valid_from=2026-09-01/'
+        'curated/dim_scheduled_stop_time/valid_from=2026-09-01T020011Z/'
         'data.parquet',
     )
     trip_path = f'{tmp_path}/trip.parquet'
@@ -774,13 +774,15 @@ def test_resolve_dim_source_takes_the_latest_snapshot_in_effect(
     _bucket: str,
 ) -> None:
     """A service day uses the newest snapshot at or before it."""
-    put_snapshots(bucket=_bucket, valid_from=['2026-09-19', '2026-09-22'])
+    put_snapshots(bucket=_bucket, valid_from=[
+        '2026-09-19T173455Z', '2026-09-22T020011Z',
+    ])
     assert resolve_dim_source(
         bucket=_bucket, service_date=date(2026, 9, 23),
         session=boto3.Session(),
     ) == (
         f's3://{_bucket}/curated/dim_scheduled_stop_time/'
-        'valid_from=2026-09-22/data.parquet'
+        'valid_from=2026-09-22T020011Z/data.parquet'
     )
 
 
@@ -788,13 +790,15 @@ def test_resolve_dim_source_falls_back_to_the_earliest_snapshot(
     _bucket: str,
 ) -> None:
     """A day before the first snapshot borrows the earliest one."""
-    put_snapshots(bucket=_bucket, valid_from=['2026-09-22', '2026-09-19'])
+    put_snapshots(bucket=_bucket, valid_from=[
+        '2026-09-22T020011Z', '2026-09-19T173455Z',
+    ])
     assert resolve_dim_source(
         bucket=_bucket, service_date=date(2026, 9, 17),
         session=boto3.Session(),
     ) == (
         f's3://{_bucket}/curated/dim_scheduled_stop_time/'
-        'valid_from=2026-09-19/data.parquet'
+        'valid_from=2026-09-19T173455Z/data.parquet'
     )
 
 
@@ -844,3 +848,24 @@ def test_merge_trips_skips_a_day_without_trip_partials(
         Bucket=_bucket, Prefix='curated/fact_trip/',
     )
     assert 'Contents' not in listed
+
+
+def test_resolve_dim_source_takes_the_last_check_of_the_day(
+    _bucket: str,
+) -> None:
+    """Of two snapshots checked on the service day's date, the later wins.
+
+    The comparison is the check's UTC date against the service date, so
+    a check late on the UTC date still applies to that day.
+    """
+    put_snapshots(bucket=_bucket, valid_from=[
+        '2026-09-22T020011Z', '2026-09-23T020011Z', '2026-09-23T230911Z',
+        '2026-09-24T020011Z',
+    ])
+    assert resolve_dim_source(
+        bucket=_bucket, service_date=date(2026, 9, 23),
+        session=boto3.Session(),
+    ) == (
+        f's3://{_bucket}/curated/dim_scheduled_stop_time/'
+        'valid_from=2026-09-23T230911Z/data.parquet'
+    )

@@ -1,10 +1,12 @@
 """Choosing the timetable snapshot a service day is merged against."""
 
-from datetime import date
+from datetime import date, datetime
 from typing import Any, Final
 
 import boto3
 from aws_lambda_powertools import Logger
+
+from common.gtfs_static import SNAPSHOT_LABEL_FORMAT
 
 logger = Logger()
 
@@ -34,8 +36,9 @@ def valid_from_for(
     Returns
     -------
     str | None
-        The latest ``valid_from`` partition value at or before
-        ``service_date``. For a day before the first snapshot, the
+        The latest ``valid_from`` partition value whose check fell on
+        or before ``service_date``, comparing the check's UTC date with
+        the Sydney service date. For a day before the first snapshot, the
         earliest one, with a warning: collection began before the
         timetable was first captured. None when no snapshot exists.
     """
@@ -54,7 +57,8 @@ def valid_from_for(
     snapshots: list[str] = sorted(candidates)
     eligible = [
         value for value in snapshots
-        if date.fromisoformat(value) <= service_date
+        if datetime.strptime(value, SNAPSHOT_LABEL_FORMAT).date()
+        <= service_date
     ]
     if eligible:
         return eligible[-1]

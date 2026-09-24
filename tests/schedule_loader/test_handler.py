@@ -4,7 +4,9 @@ import io
 import json
 import os
 import zipfile
+from datetime import UTC, datetime
 from http import HTTPStatus
+from zoneinfo import ZoneInfo
 
 import boto3
 import pytest
@@ -20,6 +22,7 @@ from schedule_loader.handler import (
     latest_sha256,
     read_filename,
     schedule_check_key,
+    snapshot_label,
     write_dimensions,
 )
 
@@ -356,10 +359,10 @@ def test_archive_bundle_stores_the_zip_bytes(_bucket: str) -> None:
             payload=payload, sha256='deadbeef',
             filename='buses_GTFS_PROD_20260923110000.zip',
         ),
-        valid_from='2026-09-23',
+        valid_from='2026-09-23T230911Z',
     )
     assert key == (
-        'curated/schedule_bundle/valid_from=2026-09-23/'
+        'curated/schedule_bundle/valid_from=2026-09-23T230911Z/'
         'buses_GTFS_PROD_20260923110000.zip'
     )
     body = boto3.client('s3').get_object(Bucket=_bucket, Key=key)['Body']
@@ -376,9 +379,9 @@ def test_archive_bundle_keeps_the_key_under_its_partition(
         bundle=StaticBundle(
             payload=b'zip', sha256='deadbeef', filename=filename,
         ),
-        valid_from='2026-09-23',
+        valid_from='2026-09-23T230911Z',
     )
-    assert key.startswith('curated/schedule_bundle/valid_from=2026-09-23/')
+    assert key.startswith('curated/schedule_bundle/valid_from=2026-09-23T230911Z/')
     assert key.count('/') == 3
     assert key.endswith('.zip')
 
@@ -414,3 +417,50 @@ def test_handler_archives_a_bundle_that_fails_to_load(
     with pytest.raises(zipfile.BadZipFile):
         handler({}, _Context())
     assert len(bundle_keys(bucket=_bucket)) == 1
+
+
+def test_snapshot_label_is_the_check_time_in_utc() -> None:
+    """The label is the check instant in UTC, to the second."""
+    assert snapshot_label(
+        checked_at=datetime(2026, 9, 23, 23, 9, 11, 988959, tzinfo=UTC),
+    ) == '2026-09-23T230911Z'
+    assert snapshot_label(
+        checked_at=datetime(
+            2026, 9, 24, 9, 9, 11, tzinfo=ZoneInfo('Australia/Sydney'),
+        ),
+    ) == '2026-09-23T230911Z'
+
+
+@responses.activate
+def test_handler_keeps_two_changed_bundles_from_one_day(
+    _bucket: str, _ssm_parameter: str,
+) -> None:
+    """A second change on the same UTC date does not overwrite the first."""
+    responses.add(
+        responses.GET, BUNDLE_URL, body=build_bundle(),
+        status=HTTPStatus.OK,
+    )
+    responses.add(
+        responses.GET, BUNDLE_URL,
+        body=build_bundle(
+            extra='"2447_161","2447","161","Maitland","700"\n',
+        ),
+        status=HTTPStatus.OK,
+    )
+    os.environ['BUCKET_NAME'] = _bucket
+    os.environ['API_KEY_PARAMETER_NAME'] = _ssm_parameter
+    checks = [
+        handler({}, _Context(), now=datetime(2026, 9, 23, hour, 9, 11,
+                                             tzinfo=UTC))
+        for hour in (2, 23)
+    ]
+    assert [check['valid_from'] for check in checks] == [
+        '2026-09-23T020911Z', '2026-09-23T230911Z',
+    ]
+    listed = boto3.client('s3').list_objects_v2(
+        Bucket=_bucket, Prefix='curated/dim_route/', Delimiter='/',
+    )
+    assert [one['Prefix'] for one in listed['CommonPrefixes']] == [
+        'curated/dim_route/valid_from=2026-09-23T020911Z/',
+        'curated/dim_route/valid_from=2026-09-23T230911Z/',
+    ]
