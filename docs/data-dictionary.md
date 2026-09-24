@@ -529,7 +529,7 @@ measured.
 | `had_vehicle` | `bool` | True if a bus was attached to this trip at any point in the day. | True if any hour said so. Never null. |
 | `lost_tracking` | `bool` | True when the bus stopped reporting before reaching this stop and only echoes followed. The prediction is stale. | Recomputed for the whole day: true when the day's latest observation of any kind is later than its latest real one. False when there was never a real observation. Never null. |
 | `is_reliable` | `bool` | True when the arrival time is worth trusting: a real delay exists, tracking did not drop, the arrival is after 2000 (never an epoch artefact), and the arrival was last sent no more than 60 seconds before the predicted arrival (`arrival_updated_at_utc`, not `last_update_at_utc`, so a later departure-only update does not make a stale arrival fresh). **Headline figures use only rows where this is true.** | Computed. False when any condition fails, including when a delay exists but no predicted arrival time does, leaving nothing to compare against. Never null. The 60-second rule is explained in [methodology 1](methodology.md#1-arrival-times-are-predictions-not-observations). |
-| `scheduled_arrival_utc` | `timestamp[us, tz=UTC]` | When the timetable said the bus should arrive. Subtract from `final_predicted_arrival_utc` to get lateness directly. | Joined from `dim_scheduled_stop_time` on `trip_id` and `stop_sequence`, using the latest snapshot whose check's UTC date is on or before this service date, or the earliest snapshot for a day before any was captured. Its `HH:MM:SS` reading, which may exceed 24 hours, is added to Sydney midnight and converted to UTC. Null when no snapshot exists at all, or when the snapshot has no matching row. Which midnight it counts from is settled one way here and is not confirmed against TfNSW - see [methodology 10](methodology.md#10-which-midnight-a-timetable-time-counts-from). |
+| `scheduled_arrival_utc` | `timestamp[us, tz=UTC]` | When the timetable said the bus should arrive. Subtract from `final_predicted_arrival_utc` to get lateness directly. | Joined from `dim_scheduled_stop_time` on `trip_id` and `stop_sequence`, using the latest snapshot checked on or before this service date in Sydney time, or the earliest snapshot for a day before any was captured. Its `HH:MM:SS` reading, which may exceed 24 hours, is added to Sydney midnight and converted to UTC. Null when no snapshot exists at all, or when the snapshot has no matching row. Which midnight it counts from is settled one way here and is not confirmed against TfNSW - see [methodology 10](methodology.md#10-which-midnight-a-timetable-time-counts-from). |
 
 Days before the first timetable was captured borrow the earliest snapshot,
 on the assumption that the timetable did not change in between. That
@@ -660,13 +660,18 @@ day and writes a new snapshot only when the bundle's contents have changed,
 under `valid_from=YYYY-MM-DDTHHMMSSZ`, the UTC time of the check that
 noticed the change. Naming by time, not date, keeps both snapshots when the
 bundle changes twice in one day. To use the timetable that applied on a
-given service day, take the latest `valid_from` whose UTC date is on or
-before it, which is what the merge does.
+given service day, take the latest `valid_from` whose check fell on or
+before that day **in Sydney time**, which is what the merge does. The
+Sydney date matters: a check early the next Sydney morning can already
+hold a bundle regenerated without the previous night's after-midnight
+trips.
 
 Snapshots written before 24 September 2026 were named by UTC date alone and
 were renamed to their check time. On 23 September two changed bundles
 shared one date and the later overwrote the earlier, so that day holds only
-the 23:09 UTC check's snapshot.
+the 23:09 UTC check's snapshot; the 02:00 UTC check's
+`dim_scheduled_stop_time` was restored from a saved copy, but its other
+dimensions are gone.
 
 Every value in a GTFS zip arrives as quoted text, so types are set
 deliberately here rather than guessed. Identifiers stay `string`: `stop_id`
@@ -1082,7 +1087,7 @@ where `dt` is the UTC date of the check.
 | `valid_from` | `string` or null | The snapshot partition this check created, as `YYYY-MM-DDTHHMMSSZ`, UTC. Matches the `valid_from=` folder under `curated/dim_*`. | The check time when `changed` is true. **Null when `changed` is false**, because no snapshot was written. Records written before 24 September 2026 hold the UTC date alone (`YYYY-MM-DD`); their folders were since renamed to the check time. |
 
 To find which timetable was in force on a given day, take the largest
-`valid_from` whose UTC date is on or before it. That is what the merge does when it resolves
+`valid_from` whose check fell on or before it in Sydney time. That is what the merge does when it resolves
 `scheduled_arrival_utc`.
 
 If this job does not run on a day the timetable changed, that timetable is

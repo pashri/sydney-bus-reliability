@@ -1,12 +1,13 @@
 """Choosing the timetable snapshot a service day is merged against."""
 
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from typing import Any, Final
 
 import boto3
 from aws_lambda_powertools import Logger
 
 from common.gtfs_static import SNAPSHOT_LABEL_FORMAT
+from common.service_day import SYDNEY
 
 logger = Logger()
 
@@ -37,10 +38,13 @@ def valid_from_for(
     -------
     str | None
         The latest ``valid_from`` partition value whose check fell on
-        or before ``service_date``, comparing the check's UTC date with
-        the Sydney service date. For a day before the first snapshot, the
-        earliest one, with a warning: collection began before the
-        timetable was first captured. None when no snapshot exists.
+        or before ``service_date`` in Sydney time. A check early on the
+        next Sydney day must not serve the day before: by then the
+        bundle may have been regenerated without the trips that ran
+        after midnight, which the day's merge needs to recognise.
+        For a day before the first snapshot, the earliest one, with a
+        warning: collection began before the timetable was first
+        captured. None when no snapshot exists.
     """
     pages = client.get_paginator('list_objects_v2').paginate(
         Bucket=bucket,
@@ -57,8 +61,9 @@ def valid_from_for(
     snapshots: list[str] = sorted(candidates)
     eligible = [
         value for value in snapshots
-        if datetime.strptime(value, SNAPSHOT_LABEL_FORMAT).date()
-        <= service_date
+        if datetime.strptime(value, SNAPSHOT_LABEL_FORMAT).replace(
+            tzinfo=UTC,
+        ).astimezone(SYDNEY).date() <= service_date
     ]
     if eligible:
         return eligible[-1]

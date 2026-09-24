@@ -850,22 +850,26 @@ def test_merge_trips_skips_a_day_without_trip_partials(
     assert 'Contents' not in listed
 
 
-def test_resolve_dim_source_takes_the_last_check_of_the_day(
-    _bucket: str,
-) -> None:
-    """Of two snapshots checked on the service day's date, the later wins.
+def test_resolve_dim_source_dates_a_check_in_sydney(_bucket: str) -> None:
+    """A check applies from its Sydney date, and the latest on a date wins.
 
-    The comparison is the check's UTC date against the service date, so
-    a check late on the UTC date still applies to that day.
+    23:09 UTC on 23 September is 09:09 on the 24th in Sydney. By then
+    TfNSW has regenerated the bundle, which can drop trips that ran in
+    the small hours of the 23rd, so that check must not serve the 23rd.
     """
     put_snapshots(bucket=_bucket, valid_from=[
-        '2026-09-22T020011Z', '2026-09-23T020011Z', '2026-09-23T230911Z',
-        '2026-09-24T020011Z',
+        '2026-09-22T020011Z', '2026-09-23T020011Z', '2026-09-23T020511Z',
+        '2026-09-23T230911Z',
     ])
-    assert resolve_dim_source(
-        bucket=_bucket, service_date=date(2026, 9, 23),
-        session=boto3.Session(),
-    ) == (
-        f's3://{_bucket}/curated/dim_scheduled_stop_time/'
-        'valid_from=2026-09-23T230911Z/data.parquet'
-    )
+    chosen = {
+        day: resolve_dim_source(
+            bucket=_bucket, service_date=date(2026, 9, day),
+            session=boto3.Session(),
+        )
+        for day in (23, 24)
+    }
+    prefix = f's3://{_bucket}/curated/dim_scheduled_stop_time/valid_from='
+    assert chosen == {
+        23: f'{prefix}2026-09-23T020511Z/data.parquet',
+        24: f'{prefix}2026-09-23T230911Z/data.parquet',
+    }
