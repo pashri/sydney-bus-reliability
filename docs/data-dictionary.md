@@ -173,8 +173,9 @@ daylight saving is in effect, so a Sydney reader must convert. Two kinds of
 value are Sydney-local instead, and they are dates or clock readings rather
 than instants:
 
-- `service_date` and the `valid_from=` / `service_date=` partition values
-  are Sydney calendar dates.
+- `service_date`, and the `service_date=` and `collection_date=` partition
+  values, are Sydney calendar dates. (`valid_from=` is not: it is a UTC
+  instant, below.)
 - `arrival_time` and `departure_time` in `dim_scheduled_stop_time` are
   Sydney wall-clock readings, and can exceed 24 hours.
 
@@ -226,9 +227,9 @@ Everything sits in one S3 bucket, Amazon's flat file store.
       fact_trip_stop/service_date=YYYY-MM-DD/data.parquet
       fact_trip/service_date=YYYY-MM-DD/data.parquet
       fact_collector_run/collection_date=YYYY-MM-DD/data.parquet
-      dim_route/valid_from=YYYY-MM-DD/data.parquet
+      dim_route/valid_from=YYYY-MM-DDTHHMMSSZ/data.parquet
       dim_trip/...                  (and six more dimensions)
-      schedule_bundle/valid_from=YYYY-MM-DD/<bundle filename>.zip
+      schedule_bundle/valid_from=YYYY-MM-DDTHHMMSSZ/<bundle filename>.zip
       collector_run/dt=YYYY-MM-DD/<invocation-id>.jsonl
       curation_run/dt=YYYY-MM-DD/<invocation-id>.jsonl
       schedule_check/dt=YYYY-MM-DD/HHMMSS-<invocation-id>.jsonl
@@ -243,10 +244,10 @@ same date, deliberately, so it does not matter which one a reader gets. Where
 they ever diverge the folder wins, and anything that reads a file by its full
 path and writes it back would persist the folder's value over the column's.
 `dt` and `hour` under `raw/` and `_partial/` are **UTC**. `service_date=`
-and `collection_date=` are **Sydney dates**. `valid_from=` is a **UTC
-date**, taken from the instant of the check: the scheduled noon-Sydney run
-lands on the same date either way, but a run before 10:00 Sydney - 11:00
-while daylight saving is in effect - files under the previous UTC date.
+and `collection_date=` are **Sydney dates**. `valid_from=` is the **UTC
+instant of the check**, to the second, written without colons, e.g.
+`2026-09-23T230911Z`. Query engines read it as text; sorting the text sorts
+the snapshots in time order.
 
 Three prefixes expire on a schedule. `raw/` is deleted after 30 days.
 `curated/_partial/` is deleted after 3 days, which is the window in which a
@@ -528,7 +529,7 @@ measured.
 | `had_vehicle` | `bool` | True if a bus was attached to this trip at any point in the day. | True if any hour said so. Never null. |
 | `lost_tracking` | `bool` | True when the bus stopped reporting before reaching this stop and only echoes followed. The prediction is stale. | Recomputed for the whole day: true when the day's latest observation of any kind is later than its latest real one. False when there was never a real observation. Never null. |
 | `is_reliable` | `bool` | True when the arrival time is worth trusting: a real delay exists, tracking did not drop, the arrival is after 2000 (never an epoch artefact), and the arrival was last sent no more than 60 seconds before the predicted arrival (`arrival_updated_at_utc`, not `last_update_at_utc`, so a later departure-only update does not make a stale arrival fresh). **Headline figures use only rows where this is true.** | Computed. False when any condition fails, including when a delay exists but no predicted arrival time does, leaving nothing to compare against. Never null. The 60-second rule is explained in [methodology 1](methodology.md#1-arrival-times-are-predictions-not-observations). |
-| `scheduled_arrival_utc` | `timestamp[us, tz=UTC]` | When the timetable said the bus should arrive. Subtract from `final_predicted_arrival_utc` to get lateness directly. | Joined from `dim_scheduled_stop_time` on `trip_id` and `stop_sequence`, using the most recent snapshot in effect on or before this service date, or the earliest snapshot for a day before any was captured. Its `HH:MM:SS` reading, which may exceed 24 hours, is added to Sydney midnight and converted to UTC. Null when no snapshot exists at all, or when the snapshot has no matching row. Which midnight it counts from is settled one way here and is not confirmed against TfNSW - see [methodology 10](methodology.md#10-which-midnight-a-timetable-time-counts-from). |
+| `scheduled_arrival_utc` | `timestamp[us, tz=UTC]` | When the timetable said the bus should arrive. Subtract from `final_predicted_arrival_utc` to get lateness directly. | Joined from `dim_scheduled_stop_time` on `trip_id` and `stop_sequence`, using the latest snapshot whose check's UTC date is on or before this service date, or the earliest snapshot for a day before any was captured. Its `HH:MM:SS` reading, which may exceed 24 hours, is added to Sydney midnight and converted to UTC. Null when no snapshot exists at all, or when the snapshot has no matching row. Which midnight it counts from is settled one way here and is not confirmed against TfNSW - see [methodology 10](methodology.md#10-which-midnight-a-timetable-time-counts-from). |
 
 Days before the first timetable was captured borrow the earliest snapshot,
 on the assumption that the timetable did not change in between. That
@@ -649,16 +650,23 @@ any day can be rebuilt from it - but only until the bucket deletes it after
 The eight dimensions are the timetable, unpacked out of the GTFS zip into
 one Parquet file each. They keep only some of the zip's columns, so the zip
 itself is archived beside them, at
-`curated/schedule_bundle/valid_from=YYYY-MM-DD/`, named as the server named
+`curated/schedule_bundle/valid_from=YYYY-MM-DDTHHMMSSZ/`, named as the server named
 it (`bundle.zip` when it gave no name). A column the dimensions drop can be
 recovered from any snapshot archived since this began, but not from the
 snapshots before it.
 
 They are snapshots, not a history. The loader downloads the bundle once a
 day and writes a new snapshot only when the bundle's contents have changed,
-under `valid_from=YYYY-MM-DD`, the UTC date of the check that noticed the
-change. To use the timetable that applied on a given day, take the latest
-`valid_from` at or before it, which is what the merge does.
+under `valid_from=YYYY-MM-DDTHHMMSSZ`, the UTC time of the check that
+noticed the change. Naming by time, not date, keeps both snapshots when the
+bundle changes twice in one day. To use the timetable that applied on a
+given service day, take the latest `valid_from` whose UTC date is on or
+before it, which is what the merge does.
+
+Snapshots written before 24 September 2026 were named by UTC date alone and
+were renamed to their check time. On 23 September two changed bundles
+shared one date and the later overwrote the earlier, so that day holds only
+the 23:09 UTC check's snapshot.
 
 Every value in a GTFS zip arrives as quoted text, so types are set
 deliberately here rather than guessed. Identifiers stay `string`: `stop_id`
@@ -897,18 +905,29 @@ and the [Census DataPacks](https://www.abs.gov.au/census/find-census-data/datapa
 | `boundary_tie` | `boolean` | True when the stop sits exactly on a shared edge and matched more than one block. | Count of matches. |
 | `irsd_score`, `irsd_national_decile`, `irsd_state_decile` | `double`, `smallint` | Relative socio-economic disadvantage. Deciles both ways: against Australia, and against NSW alone. | SEIFA 2021 at SA1. |
 | `irsad_*`, `ier_*`, `ieo_*` | | The other three SEIFA indexes, same shape. | SEIFA 2021 at SA1. |
-| `sa1_usual_resident_population` | `integer` | Residents of the stop's SA1. | SEIFA. |
-| `seifa_irsd_excluded` | `boolean` | True when the ABS explicitly excluded this area from the index. | SEIFA excluded areas table. |
+| `sa1_usual_resident_population` | `integer` | Residents of the stop's SA1. | SEIFA. Null when the SA1 matched no SEIFA row. |
+| `seifa_irsd_excluded` | `boolean` | True when the ABS explicitly excluded this area from the index. **False does not mean the stop was scored**: a stop whose SA1 matched neither the index nor the excluded-areas table is also false. | SEIFA excluded areas table. |
 | `distance_to_cbd_m` | `double` | Straight-line distance to the Sydney CBD. | Spherical distance to a committed point. |
 | `nearest_centre_id`, `nearest_centre_name`, `distance_to_nearest_centre_m` | | The closest major centre, named. | A committed list of centres. |
 | `vintage`, `asgs_edition`, `seifa_release`, `census_year` | | Which build, and from which editions. | Recorded at build time. |
 
-A small share of stops carry **no SEIFA score at all**. That is not missing
-data: the ABS excludes areas with essentially no residents, and those stops
-are in industrial estates, showgrounds and cemeteries. `mesh_block_category`
-says which. Borrowing a surrounding suburb's score would attribute a
-characteristic of residents to a place that has none, so the score is left
-null.
+A small share of stops carry **no SEIFA score at all**, for two different
+reasons. Among Greater Sydney stops on ordinary bus routes (route type
+`700`), measured on the September 2026 build, 1,500 stops (5.7%) have no
+score:
+
+- **175 are in areas the ABS excluded** from the index, usually for having
+  almost no residents. `seifa_irsd_excluded` is true for these.
+- **The other 1,325 have an SA1 that matched no SEIFA row at all.** Their
+  `sa1_usual_resident_population` is null too, and `seifa_irsd_excluded` is
+  false. By `mesh_block_category` they are mostly industrial (614), parkland
+  (423) and commercial (222), but also education (102) and residential (52),
+  so "no residents" does not describe all of them.
+
+These stops sit on 489 of 663 routes. Borrowing a surrounding area's score
+would attribute residents' characteristics to places the index does not
+describe, so the score is left null. Summaries by SEIFA leave these stops
+out and report how many were left out; they are never imputed.
 
 Distance to the Sydney CBD describes a monocentric city, which Sydney is
 not. `distance_to_nearest_centre_m` exists because a Parramatta stop is not
@@ -1060,10 +1079,10 @@ where `dt` is the UTC date of the check.
 | `zip_sha256` | `string` | A fingerprint of the downloaded zip's bytes, as 64 hex characters. Two downloads with the same fingerprint are the same timetable. | Computed over the whole file. |
 | `zip_filename` | `string` | The filename the server offered, e.g. `buses_GTFS_PROD_20260918103100.zip`. **Provenance only.** The timestamp in it changes on every rebuild whether or not the contents did, so it must never be used to detect change. | Read from the `Content-Disposition` header. `''` when the header is absent, or uses a form the parser does not handle. |
 | `changed` | `bool` | True when this fingerprint differs from the previous check's. Only a true here causes dimension snapshots to be written. | Compared against the most recent stored check. True on the very first check ever, since there is nothing to compare to. |
-| `valid_from` | `string` or null | The snapshot partition this check created, as `YYYY-MM-DD`, UTC. Matches the `valid_from=` folder under `curated/dim_*`. | The check date when `changed` is true. **Null when `changed` is false**, because no snapshot was written. |
+| `valid_from` | `string` or null | The snapshot partition this check created, as `YYYY-MM-DDTHHMMSSZ`, UTC. Matches the `valid_from=` folder under `curated/dim_*`. | The check time when `changed` is true. **Null when `changed` is false**, because no snapshot was written. Records written before 24 September 2026 hold the UTC date alone (`YYYY-MM-DD`); their folders were since renamed to the check time. |
 
 To find which timetable was in force on a given day, take the largest
-`valid_from` at or before it. That is what the merge does when it resolves
+`valid_from` whose UTC date is on or before it. That is what the merge does when it resolves
 `scheduled_arrival_utc`.
 
 If this job does not run on a day the timetable changed, that timetable is

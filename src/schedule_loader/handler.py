@@ -1,8 +1,9 @@
 """Daily capture of the TfNSW static GTFS bundle.
 
 The bundle is fetched every day but written only when its content hash
-changes, so a ``valid_from`` partition marks a day the timetable
-actually changed.
+changes, so a ``valid_from`` partition marks a check at which the
+timetable had changed. It is named for the check time, not its date,
+because the bundle can change twice in one day.
 
 The bundle is forward-looking. It describes tomorrow onward and barely
 covers its own generation day, so it cannot reconstruct a past day. A
@@ -23,7 +24,7 @@ import requests
 from aws_lambda_powertools import Logger
 from aws_lambda_powertools.utilities.typing import LambdaContext
 
-from common.gtfs_static import StaticBundle, zip_sha256
+from common.gtfs_static import SNAPSHOT_LABEL_FORMAT, StaticBundle, zip_sha256
 from common.parquet import ParquetRepository
 from common.types_ import ScheduleCheck
 from schedule_loader.dimensions import SPECS, Dimension, dimension_batches
@@ -185,6 +186,25 @@ def read_hash(*, client: Any, bucket: str, key: str) -> str:
     return record['zip_sha256']
 
 
+def snapshot_label(*, checked_at: datetime) -> str:
+    """Name a snapshot by the instant its bundle was checked.
+
+    Two changed bundles checked on one day get different names, so
+    the later never overwrites the earlier.
+
+    Parameters
+    ----------
+    checked_at : datetime
+        Timezone-aware instant of the check.
+
+    Returns
+    -------
+    str
+        The ``valid_from`` value, in ``SNAPSHOT_LABEL_FORMAT``.
+    """
+    return f'{checked_at.astimezone(UTC):{SNAPSHOT_LABEL_FORMAT}}'
+
+
 def archive_bundle(
     *,
     client: Any,
@@ -206,7 +226,7 @@ def archive_bundle(
     bundle : StaticBundle
         The downloaded bundle.
     valid_from : str
-        Partition value, as ``YYYY-MM-DD``.
+        Partition value, from ``snapshot_label``.
 
     Returns
     -------
@@ -236,7 +256,7 @@ def write_dimensions(
     repository : ParquetRepository
         Destination for Parquet objects.
     valid_from : str
-        Partition value, as ``YYYY-MM-DD``.
+        Partition value, from ``snapshot_label``.
 
     Returns
     -------
@@ -303,6 +323,8 @@ def read_api_key(*, parameter_name: str, session: boto3.Session) -> str:
 def handler(
     event: dict[str, Any],  # pylint: disable=unused-argument
     context: LambdaContext,
+    *,
+    now: datetime | None = None,
 ) -> ScheduleCheck:
     """Fetch the static bundle and snapshot it only when it changed.
 
@@ -312,6 +334,9 @@ def handler(
         EventBridge event, unused.
     context : LambdaContext
         Lambda context, used for the invocation id.
+    now : datetime | None
+        Test-only check time. Lambda invokes the handler with two
+        positional arguments, so this is always None in production.
 
     Returns
     -------
@@ -320,7 +345,7 @@ def handler(
     """
     session = boto3.Session()
     bucket = os.environ['BUCKET_NAME']
-    checked_at = datetime.now(tz=UTC)
+    checked_at = now or datetime.now(tz=UTC)
     bundle = fetch_bundle(
         api_key=read_api_key(
             parameter_name=os.environ['API_KEY_PARAMETER_NAME'],
@@ -330,7 +355,7 @@ def handler(
     client = session.client('s3')
     previous = latest_sha256(client=client, bucket=bucket)
     changed = previous != bundle.sha256
-    valid_from = f'{checked_at:%Y-%m-%d}' if changed else None
+    valid_from = snapshot_label(checked_at=checked_at) if changed else None
     if changed:
         logger.info(
             'timetable changed, writing snapshot',

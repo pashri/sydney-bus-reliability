@@ -25,6 +25,14 @@ logger = Logger()
 ENCODING: Final[str] = 'utf-8-sig'
 """GTFS text files are UTF-8 and may carry a byte-order mark."""
 
+SNAPSHOT_LABEL_FORMAT: Final[str] = '%Y-%m-%dT%H%M%SZ'
+"""How a timetable snapshot's ``valid_from`` is written: its check time.
+
+UTC, to the second, with no colons. DuckDB reads the value from the
+path as text rather than guessing a timestamp type, and sorting the
+text sorts the snapshots in time order.
+"""
+
 
 @dataclass(frozen=True, slots=True)
 class StaticBundle:
