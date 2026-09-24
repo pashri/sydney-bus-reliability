@@ -21,10 +21,19 @@ Three rules:
    prediction.
 3. ``n_updates`` counts real observations only. A trip is listed and
    echoed every 60 s for hours before it departs.
+
+One kind of update is dropped whole. As a bus leaves its first stop
+early in the morning, TfNSW sometimes sends a single update with every
+time exactly a day late, the delays still right, and the first stop's
+departure copied from the timetable. The next poll corrects the stops
+ahead but never mentions the stops already passed, so latest-wins would
+keep the day-late time for good. An update with any time twelve hours
+or more after its trip's start is not read at all, not even as an
+observation.
 """
 
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from itertools import islice
 from typing import Any, Final
 
@@ -33,10 +42,13 @@ from aws_lambda_powertools import Logger
 from google.transit import gtfs_realtime_pb2
 
 from common.feed_decode import optional_field
+from common.service_day import SYDNEY
 
 logger = Logger()
 
 BATCH_SIZE: Final[int] = 20_000  # rows
+DAY_AHEAD: Final[timedelta] = timedelta(hours=12)
+"""How far past its trip's start a time must be to read as a day late."""
 
 StopRelationship = gtfs_realtime_pb2.TripUpdate.StopTimeUpdate
 REAL_RELATIONSHIPS: Final[frozenset[int]] = frozenset({
@@ -127,12 +139,62 @@ def observation_time(*, update: Any, fetched_at: datetime) -> datetime:
     return fetched_at
 
 
+def trip_start(*, trip: Any) -> datetime | None:
+    """Read when a trip starts, from its descriptor.
+
+    Parameters
+    ----------
+    trip : Any
+        A TripDescriptor message.
+
+    Returns
+    -------
+    datetime | None
+        ``start_date`` and ``start_time`` as a Sydney instant, or None
+        when either is missing or malformed. For a trip timetabled after
+        midnight the feed already sends the next date and a wrapped
+        time, so this is its true start.
+    """
+    try:
+        return datetime.strptime(
+            f'{trip.start_date} {trip.start_time}', '%Y%m%d %H:%M:%S',
+        ).replace(tzinfo=SYDNEY)
+    except ValueError:
+        return None
+
+
+def dated_a_day_ahead(*, update: Any) -> bool:
+    """Say whether an update carries a time a day past its trip's start.
+
+    Parameters
+    ----------
+    update : Any
+        A TripUpdate message.
+
+    Returns
+    -------
+    bool
+        True when any arrival or departure is at least ``DAY_AHEAD``
+        after the trip's start. False when the start is unknown.
+    """
+    start = trip_start(trip=update.trip)
+    if start is None:
+        return False
+    return any(
+        when - start >= DAY_AHEAD
+        for stop in update.stop_time_update
+        for name in ('arrival', 'departure')
+        if (when := stop_event(stop=stop, name=name)[0]) is not None
+    )
+
+
 class TripStopReducer:
     """Accumulates the last real prediction per (trip, stop)."""
 
     def __init__(self) -> None:
         self.rows: dict[Key, dict[str, Any]] = {}
         self.real_observations = 0
+        self.day_ahead_updates = 0
 
     def add(self, *, feed: Any, fetched_at: datetime) -> None:
         """Absorb every trip update in one poll.
@@ -160,6 +222,9 @@ class TripStopReducer:
         fetched_at : datetime
             UTC time the poll was issued.
         """
+        if dated_a_day_ahead(update=update):
+            self.day_ahead_updates += 1
+            return
         seen_at = observation_time(
             update=update, fetched_at=fetched_at,
         )
