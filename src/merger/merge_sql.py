@@ -51,9 +51,10 @@ def service_day_partials(*, dim_source: str | None, date_column: str) -> str:
     str
         CTE definitions, without the leading ``WITH``, ending in
         ``partials``. It holds every partial column except ``dt`` and
-        ``hour``, with the feed's date as ``start_date`` and the
-        derived ``service_date`` as ``YYYYMMDD``, and only rows for
-        ``$service_date``.
+        ``hour``, with the feed's date as ``start_date``, the derived
+        ``service_date`` as ``YYYYMMDD``, and ``partial_hour``, the
+        UTC hour the row's partial covers, for breaking ties. Only rows
+        for ``$service_date`` are kept.
     """
     service_date = f'partial.{date_column}'
     first_times = ''
@@ -76,6 +77,8 @@ def service_day_partials(*, dim_source: str | None, date_column: str) -> str:
             SELECT
                 partial.* EXCLUDE (dt, hour, {date_column}),
                 partial.{date_column} AS start_date,
+                partial.dt::DATE + partial.hour::INTEGER * INTERVAL 1 HOUR
+                    AS partial_hour,
                 {service_date} AS service_date
             FROM read_parquet(
                 $partials, hive_partitioning = true, union_by_name = true
@@ -118,7 +121,7 @@ latest AS (
             ORDER BY
                 last_update_at_utc DESC NULLS LAST,
                 last_observed_at_utc DESC NULLS LAST,
-                schedule_relationship DESC NULLS LAST
+                partial_hour DESC
         ) AS recency
     FROM partials
 ),
@@ -133,8 +136,12 @@ totals AS (
             struct_pack(
                 at := final_predicted_arrival_utc, delay := delay_s
             ),
-            arrival_updated_at_utc
-        ) AS arrival,
+            struct_pack(
+                sent := arrival_updated_at_utc,
+                observed := last_observed_at_utc,
+                hour := partial_hour
+            )
+        ) FILTER (WHERE arrival_updated_at_utc IS NOT NULL) AS arrival,
         MAX(arrival_updated_at_utc) AS arrival_updated_at_utc,
         BOOL_OR(had_vehicle) AS had_vehicle,
         MAX(last_observed_at_utc) AS final_last_observed_at_utc
@@ -204,7 +211,11 @@ The arrival and its delay come from the latest hour that sent an
 arrival, not from the latest hour, since an hour can carry only
 departure updates for a stop. ``is_reliable`` judges the arrival by
 ``arrival_updated_at_utc``, when it was last sent, so a later
-departure-only update cannot make a stale arrival look fresh.
+departure-only update cannot make a stale arrival look fresh. Two
+hours can carry the same ``arrival_updated_at_utc`` with different
+delays, because the feed can resend a timestamp unchanged while the
+delay moves on, so the tie goes to the hour observed later, and then
+to the later partial hour.
 
 ``lost_tracking`` describes the final state of the day, not whether
 any hour ever dropped. It compares the day's latest observation of any
@@ -238,8 +249,10 @@ number unless it is narrowed again.
 
 The ``ROW_NUMBER()`` tiebreak is deterministic. Ties on
 ``last_update_at_utc``, usually both NULL for pre-departure echoes,
-break on ``last_observed_at_utc``, which is set on every row
-regardless of file read order, then on ``schedule_relationship``.
+break on ``last_observed_at_utc``, then on the partial's hour. Both
+timestamps can tie across hours when the feed resends a stale
+timestamp, and one key appears at most once per partial, so the hour
+settles every tie.
 """
 
 
