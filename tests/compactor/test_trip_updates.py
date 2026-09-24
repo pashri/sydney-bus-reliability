@@ -463,3 +463,107 @@ def test_arrival_update_time_marks_the_last_arrival_sent() -> None:
     assert row['last_update_at_utc'] == datetime(
         2026, 9, 16, 21, 1, 40, tzinfo=UTC,
     )
+
+
+def epoch(when: datetime) -> int:
+    """Convert an instant to Unix seconds.
+
+    Parameters
+    ----------
+    when : datetime
+        A timezone-aware instant.
+
+    Returns
+    -------
+    int
+        Seconds since the epoch.
+    """
+    return int(when.timestamp())
+
+
+def build_started_feed(
+    *,
+    start_time: str,
+    stops: list[tuple[int, int, int, int]],
+) -> object:
+    """Build a FeedMessage with one dated trip over several stops.
+
+    Parameters
+    ----------
+    start_time : str
+        The trip's ``HH:MM:SS`` start on 23 September 2026, Sydney.
+    stops : list[tuple[int, int, int, int]]
+        Per stop: arrival time, arrival delay, departure time,
+        departure delay. An arrival time of 0 is sent as 0.
+
+    Returns
+    -------
+    object
+        A populated FeedMessage.
+    """
+    feed = gtfs_realtime_pb2.FeedMessage()
+    feed.header.gtfs_realtime_version = '1.0'
+    update = feed.entity.add(id='tu-1').trip_update
+    update.trip.trip_id = '2641868'
+    update.trip.route_id = '2503_80'
+    update.trip.start_date = '20260923'
+    update.trip.start_time = start_time
+    for sequence, (arrival, delay, departure, departure_delay) in enumerate(
+        stops, start=1,
+    ):
+        stop = update.stop_time_update.add(
+            stop_id=f'2000{sequence}', stop_sequence=sequence,
+            schedule_relationship=SCHEDULED,
+        )
+        stop.arrival.time, stop.arrival.delay = arrival, delay
+        stop.departure.time, stop.departure.delay = (
+            departure, departure_delay,
+        )
+    return feed
+
+
+DEPARTED: datetime = datetime(2026, 9, 22, 14, 8, 40, tzinfo=UTC)
+DAY: int = 86_400
+
+
+def test_an_update_dated_a_day_ahead_is_discarded() -> None:
+    """The feed's day-late poll does not replace the real departure.
+
+    As a bus leaves its first stop after midnight, TfNSW can send one
+    update with every time a day late and the first stop's departure
+    copied from the timetable. It must not win latest-wins.
+    """
+    reducer = TripStopReducer()
+    reducer.add(
+        feed=build_started_feed(start_time='00:05:00', stops=[
+            (epoch(DEPARTED), 220, epoch(DEPARTED), 220),
+        ]),
+        fetched_at=datetime(2026, 9, 22, 14, 6, 34, tzinfo=UTC),
+    )
+    reducer.add(
+        feed=build_started_feed(start_time='00:05:00', stops=[
+            (0, 0, epoch(datetime(2026, 9, 23, 14, 5, tzinfo=UTC)), 0),
+            (epoch(DEPARTED) + DAY - 60, 100, epoch(DEPARTED) + DAY, 121),
+        ]),
+        fetched_at=datetime(2026, 9, 22, 14, 7, 34, tzinfo=UTC),
+    )
+    rows = next(reducer.batches()).to_pylist()
+    assert [row['stop_sequence'] for row in rows] == [1]
+    assert rows[0]['final_predicted_departure_utc'] == DEPARTED
+    assert rows[0]['departure_delay_s'] == 220
+    assert rows[0]['n_updates'] == 1
+    assert rows[0]['lost_tracking'] is False
+
+
+def test_an_update_within_half_a_day_of_the_start_is_kept() -> None:
+    """Only a time twelve hours or more after the trip's start is dropped."""
+    reducer = TripStopReducer()
+    reducer.add(
+        feed=build_started_feed(start_time='00:05:00', stops=[
+            (epoch(DEPARTED), 220, epoch(DEPARTED), 220),
+            (epoch(DEPARTED) + 11 * 3600, 0, epoch(DEPARTED) + 11 * 3600, 0),
+        ]),
+        fetched_at=datetime(2026, 9, 22, 14, 6, 34, tzinfo=UTC),
+    )
+    rows = next(reducer.batches()).to_pylist()
+    assert len(rows) == 2

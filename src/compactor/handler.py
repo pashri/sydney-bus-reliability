@@ -124,6 +124,10 @@ def compact_trip_updates(
         schema=TRIP_SCHEMA,
         batches=statuses.batches(),
     )
+    logger.info(
+        'Dropped trip updates dated a day ahead',
+        extra={'day_ahead_updates': reducer.day_ahead_updates},
+    )
     return objects, reducer.real_observations, rows
 
 
