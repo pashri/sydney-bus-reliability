@@ -1054,3 +1054,37 @@ def test_arrival_is_judged_by_its_own_update_time(
     ).fetchall()
     merged = dict(zip([d[0] for d in _connection.description], result[0]))
     assert merged['is_reliable'] is False
+
+
+@pytest.mark.parametrize('later_first', [True, False])
+def test_arrival_tie_is_broken_by_the_later_poll(
+    _connection: duckdb.DuckDBPyConnection,
+    tmp_path: Path,
+    later_first: bool,
+) -> None:
+    """Two hours can restate one arrival time-stamp with different delays.
+
+    The feed can resend a trip's timestamp unchanged while the delay
+    moves on, across an hour boundary, so every time on the two rows can
+    match. The later hour wins, for the arrival and for the other
+    columns, whatever order the files are read in.
+    """
+    stamp = datetime(2026, 9, 16, 20, 59, tzinfo=UTC)
+    rows = {
+        '20': trip_row(hour=20, n_updates=1, delay=100, last_update=stamp),
+        '21': trip_row(hour=21, n_updates=1, delay=200, last_update=stamp),
+    }
+    rows['21']['final_predicted_departure_utc'] = stamp
+    order = ['21', '20'] if later_first else ['20', '21']
+    for hour in order:
+        glob = write_partials(
+            tmp_path=tmp_path, rows=[rows[hour]], schema=TRIP_STOP_SCHEMA,
+            hour=hour,
+        )
+    for _ in range(20):
+        result = _connection.execute(
+            TRIP_STOP_MERGE, merge_params(glob=glob),
+        ).fetchall()
+        merged = dict(zip([d[0] for d in _connection.description], result[0]))
+        assert merged['delay_s'] == 200
+        assert merged['final_predicted_departure_utc'] == stamp
