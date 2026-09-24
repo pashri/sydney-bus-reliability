@@ -59,6 +59,7 @@ Friday's timetable is the one it runs on.
 | 12. Unknown codes read as missing | Absent means "not sent or not recognised". |
 | 13. `lost_tracking` mixes two clocks | Checked, and it cannot change the answer. |
 | 14. The holiday list is hand-built | Checked against the timetable's own cancellations; nothing missing in range. |
+| 15. A trip's status is a rule, not a record | `mart_trip` applies one; its evidence columns support others. |
 
 ---
 
@@ -281,6 +282,52 @@ audit record. They are never resolved by guessing at a close match, because
 a plausible wrong answer is worse than a visible gap.
 
 ---
+
+### 15. A trip's status is a rule, not a record
+
+`fact_trip` stores what the feed said about a trip. `mart_trip` in
+`analysis/marts.sql` turns that into one status, in this order:
+
+- **cancelled**: final status `CANCELED`, and no call on the trip was
+  judged (a fresh predicted time; see `call_observation`).
+- **incomplete**: final status `CANCELED` after judged calls, or judged at
+  the first stop and then not judged for more than the last ten minutes of
+  scheduled running.
+- **ran**: any judged call.
+- **unknown**: none of the above, including trips the feed never
+  mentioned.
+
+The rule was set from service days 17-23 September 2026, on ordinary
+routes (type `700` less rail replacement):
+
+- **Final status, not "ever cancelled".** 179 of 2,821 trips cancelled at
+  some point ended `SCHEDULED`, and 160 of those carried a vehicle and
+  produced reliable stop times: they ran. Counting any cancellation would
+  add them. `ever_canceled` keeps the evidence for that sensitivity run.
+- **Partial runs.** 210 trips that ended `CANCELED` had reliable stop times,
+  every one of them before the cancellation. They ran part of the way, so
+  they count as incomplete, as TfNSW's SD7 measure would count them.
+- **Why ten minutes.** Only about 71% of last-stop arrivals pass the
+  60-second freshness test, because the terminus arrival is often last
+  updated minutes ahead and tracking often drops as the bus arrives. "Judged
+  to the last stop" would call over a quarter of trips incomplete. On
+  22 September, of trips judged at the first stop, 30,410 were judged to
+  within five minutes of their scheduled end and a further 1,051 to within
+  ten, mostly one to three stops short. The 504 beyond ten minutes were
+  on average 7 to 28 stops short, which is tracking genuinely lost.
+  `unjudged_tail_s` is kept so any other threshold is a query.
+
+Resulting daily shares on weekdays: cancelled 1.0-1.2%, incomplete about
+1.4%, unknown 2-3%. An untracked trip that ran cannot be told from a silent
+cancellation; both read unknown, which is the floor described in
+[section 5](#5-about-3-of-running-trips-report-no-bus-at-all).
+
+Two feed artefacts are handled at the call level rather than here. Some
+first-stop departures arrive exactly one day late (70 rows over three days,
+mostly after-midnight trips); a predicted time more than six hours from the
+schedule is treated as no prediction. And the feed's `delay_s` is measured
+against scheduled departure where the timetable has a dwell, so the marts
+compute every delay from the timestamps instead.
 
 ## Notes for running the pipeline
 
