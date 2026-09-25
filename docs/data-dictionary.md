@@ -415,6 +415,17 @@ down by roughly 40 to 1. The reduction follows three rules:
 
 Among real observations, the latest wins.
 
+One kind of update is not read at all. As a bus leaves its first stop early
+in the morning, TfNSW sometimes sends a single update with every time
+exactly a day late, the delays still right, and the first stop's departure
+copied from the timetable. The next poll corrects the stops ahead but never
+mentions the stops already passed, so latest-wins would keep the day-late
+time. An update with any time twelve hours or more after its trip's start
+(`start_date` and `start_time`, Sydney time) is discarded whole: it is not
+counted in `n_updates` and does not move `last_observed_at_utc`. Partials
+written before 24 September 2026 applied no such rule, but every service
+day from 17 September was replayed under it.
+
 | Column | Type | What it means | Where it comes from |
 | --- | --- | --- | --- |
 | `service_date` | `string` | The feed's start date, as `YYYYMMDD`, Sydney local. Part of the row's identity. Despite the name, not always the service day - see [Service day](#service-day). The merger derives the true one. | Copied from `trip_update.trip.start_date`. `''` if the feed omitted it. |

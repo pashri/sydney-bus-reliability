@@ -322,12 +322,16 @@ Resulting daily shares on weekdays: cancelled 1.0-1.2%, incomplete about
 cancellation; both read unknown, which is the floor described in
 [section 5](#5-about-3-of-running-trips-report-no-bus-at-all).
 
-Two feed artefacts are handled at the call level rather than here. Some
-first-stop departures arrive exactly one day late (70 rows over three days,
-mostly after-midnight trips); a predicted time more than six hours from the
-schedule is treated as no prediction. And the feed's `delay_s` is measured
-against scheduled departure where the timetable has a dwell, so the marts
-compute every delay from the timestamps instead.
+Two feed artefacts are handled elsewhere. As a bus leaves its first stop
+between midnight and about 05:10, TfNSW sometimes sends one poll with every
+stop time exactly a day late and the first stop's departure copied from the
+timetable. Over 17-23 September that left 205 day-late times in
+`fact_trip_stop`, 182 of them first-stop departures. Since 24 September the
+compactor discards such an update whole, and 17-25 September were replayed
+from raw under that rule; the marts still treat a predicted time more than
+six hours from the schedule as no prediction, as a guard. And the feed's
+`delay_s` is measured against scheduled departure where the timetable has a
+dwell, so the marts compute every delay from the timestamps instead.
 
 ## Notes for running the pipeline
 
