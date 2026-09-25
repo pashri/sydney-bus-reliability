@@ -505,6 +505,7 @@ def _write_parquet(
 
 def test_handler_records_a_short_day(
     _bucket: str, _s3_endpoint: str, tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Partials for only one of many hours still produce a record.
 
@@ -634,6 +635,11 @@ def test_handler_records_a_short_day(
         Key='curated/fact_trip/service_date=2026-09-17/data.parquet',
     )['Body'].read()))
     assert fact.column('final_status').to_pylist() == ['CANCELED']
+    emitted = [
+        json.loads(line) for line in capsys.readouterr().out.splitlines()
+        if '"_aws"' in line
+    ]
+    assert [line['Anomalies'] for line in emitted] == [[3.0]]
 
 
 def test_merge_trip_stops_resolves_scheduled_arrival(
