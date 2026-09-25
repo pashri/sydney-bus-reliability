@@ -26,6 +26,7 @@ from common.curation import CurationRepository
 from common.process import peak_rss_mb
 from common.service_day import merge_window, service_date_for
 from common.types_ import CurationJob, CurationRecord
+from merger.anomalies import check_day
 from merger.merge_sql import (
     POSITION_MERGE,
     build_trip_query,
@@ -55,6 +56,15 @@ class MergeTable(StrEnum):
     TRIP_STOP = 'trip_stop'
     VEHICLE_POSITION = 'vehicle_position'
 
+
+CHECKED: Final[frozenset[MergeTable]] = frozenset({
+    MergeTable.TRIP, MergeTable.TRIP_STOP,
+})
+"""Tables that must both be merged in a run before the day is checked.
+
+A re-run of one table alone leaves the other as it was, so the day's
+checks are left to the run that merged both.
+"""
 
 FROM_PARTIALS: Final[frozenset[MergeTable]] = frozenset({
     MergeTable.TRIP, MergeTable.TRIP_STOP, MergeTable.VEHICLE_POSITION,
@@ -902,4 +912,9 @@ def handler(
     CurationRepository(bucket=bucket, session=session).put_record(
         record=record,
     )
+    if CHECKED <= tables:
+        check_day(
+            connection=connection, bucket=bucket,
+            service_date=service_date.isoformat(),
+        )
     return record

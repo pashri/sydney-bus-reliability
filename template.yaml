@@ -516,6 +516,30 @@ Resources:
       TreatMissingData: notBreaching
       AlarmActions: [!Ref AlertTopic]
 
+  MergerAnomalyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: >-
+        A merged day failed a data check. The merger's log names the
+        check and its value. Re-merge within three days, while the
+        partials last; after that only a replay from raw repairs it.
+      AlarmName: merger-anomalies
+      # Emitted by the merger as an embedded metric in its log, once per
+      # checked day, zero included; no IAM permission is involved.
+      Namespace: SydneyBusReliability
+      MetricName: Anomalies
+      Dimensions:
+        - Name: service
+          Value: merger
+      Statistic: Maximum
+      Period: 3600
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      # A day with no merge is merger-not-running's to report.
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopic]
+
   CheckerLogGroup:
     Metadata:
       Description: Log group for the checker function, retained 30 days.

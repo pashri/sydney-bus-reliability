@@ -34,7 +34,12 @@ AWS SAM: five Lambdas, two layers and one S3 bucket.
   `fact_collector_run`.
   Not midnight, and not 04:00 either: a trip can belong to one service day
   while running as late as 06:00 the next morning, so the window it reads
-  closes at 07:00 and it has to run after that
+  closes at 07:00 and it has to run after that.
+  Once `fact_trip_stop` and `fact_trip` are written it checks the day for
+  things a correct day never has: times half a day off the schedule or
+  before 2000, duplicate keys, self-contradicting trip rows, too few trips,
+  or a collapse in scheduled or reliable rows. Any breach raises the
+  `merger-anomalies` alarm
 - `schedule_loader`, 12:00 Australia/Sydney. Fetches the static GTFS bundle
   and writes a new snapshot of the eight dimensions, named for the check time, and archives the zip itself, only when
   the bundle's content hash changes, since the bundle is forward-looking
@@ -110,6 +115,13 @@ window has nothing to read. The merger refuses rather than writing an empty
 table over a good one. `collector_run` is folded from the collector's JSONL,
 which is kept for 30 days, so it can be rebuilt long after the partials have
 gone.
+
+When `merger-anomalies` fires, the merger's log for that run has an
+`Anomaly` line per failed check, naming it with its value and limit, and a
+`Day checked` line with every measure. Fix the cause, deploy, and re-merge
+the day with `trip` and `trip_stop` both named (the check runs only when
+both are merged) while its partials remain; past three days the fix needs
+`scripts.replay` from raw.
 
 Run it as a Lambda rather than locally. The function is in the same region
 as the bucket, and a day of audit records is about 2,880 small objects -
