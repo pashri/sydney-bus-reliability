@@ -5,7 +5,7 @@ from pathlib import Path
 import duckdb
 import pytest
 
-from analysis.marts import connect
+from analysis.marts import connect, main
 from tests.analysis.world import build_inputs
 
 SNAPSHOTS: tuple[str, ...] = (
@@ -69,3 +69,33 @@ def test_connect_builds_the_marts(con: duckdb.DuckDBPyConnection) -> None:
         "select count(*) from mart_trip where service_date = '2026-09-22'",
     ).fetchone()
     assert row == (8,)
+
+
+def test_main_writes_a_database_other_clients_can_open(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """The file keeps the views, so a later connection sees the marts."""
+    root = tmp_path_factory.mktemp('pull')
+    export_world(root=root)
+    database = root / 'marts.duckdb'
+    database.write_bytes(b'stale')
+    assert main(argv=[str(root), str(database)]) == 0
+    con = duckdb.connect(str(database), read_only=True)
+    con.execute('LOAD icu')
+    row = con.execute(
+        "select count(*) from mart_trip where service_date = '2026-09-22'",
+    ).fetchone()
+    assert row == (8,)
+
+
+def test_connect_skips_tables_a_pull_has_not_fetched(
+    con: duckdb.DuckDBPyConnection,
+) -> None:
+    """dim_agency and fact_collector_run appear only when present."""
+    views = {
+        row[0] for row in con.execute(
+            'select view_name from duckdb_views() where not internal',
+        ).fetchall()
+    }
+    assert 'dim_agency_all' not in views
+    assert 'mart_stop_hour' in views
