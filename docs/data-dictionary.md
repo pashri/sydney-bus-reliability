@@ -249,7 +249,7 @@ instant of the check**, to the second, written without colons, e.g.
 `2026-09-23T230911Z`. Query engines read it as text; sorting the text sorts
 the snapshots in time order.
 
-Three prefixes expire on a schedule. `raw/` is deleted after 30 days.
+Three prefixes expire on a schedule. `raw/` is deleted after 7 days.
 `curated/_partial/` is deleted after 3 days, which is the window in which a
 failed merge can still be re-run. `curated/collector_run/` is deleted after
 30 days, by which time the merger has folded each day into

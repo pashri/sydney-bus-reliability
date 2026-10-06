@@ -52,7 +52,7 @@ AWS SAM: five Lambdas, two layers and one S3 bucket.
   `sam build` through
   `layers/duckdb/Makefile`, and the AWS-managed SDK-for-pandas layer
   supplying pyarrow, pinned by version
-- Lifecycle: `raw/` expires after 30 days, `curated/collector_run/` after
+- Lifecycle: `raw/` expires after 7 days, `curated/collector_run/` after
   30 once the merger has folded it into `fact_collector_run`, and
   `curated/_partial/` after 3. Everything else is kept
 - Python 3.14, managed with uv
@@ -80,7 +80,7 @@ layer step, and nothing to build by hand on a fresh clone.
 ## Replaying from raw
 
 A fix to the compactor or merger only reaches past days by rebuilding them
-from `raw/`, which is kept for 30 days:
+from `raw/`, which is kept for 7 days:
 
     PYTHONPATH=src uv run python -m scripts.replay \
       --from 2026-09-17 --to 2026-09-22 \

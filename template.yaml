@@ -50,7 +50,7 @@ Resources:
           - Id: ExpireRaw
             Status: Enabled
             Prefix: raw/
-            ExpirationInDays: 30  # we'll change to 7 after compactor is made
+            ExpirationInDays: 7
           # The merger folds these into fact_collector_run daily, and
           # that Parquet is kept. Expiring the JSONL also bounds how
           # many objects a merge has to list, which would otherwise
