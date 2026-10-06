@@ -38,15 +38,17 @@ create or replace macro gtfs_seconds(value) as
 
 -- The instant a GTFS time names on a service day.
 --
--- The seconds are added to the Sydney wall clock at midnight, which is
--- how the merger computes scheduled_arrival_utc. Across a daylight
--- saving change the two readings of "midnight plus N hours" differ;
--- this one matches the facts.
+-- The seconds are elapsed time from noon minus 12 hours, as GTFS defines
+-- it and as the feed's predictions count. On most days that is
+-- midnight. On a daylight saving change it is an hour away from
+-- midnight, so wall-clock midnight plus N hours names the wrong instant
+-- for calls after the change. The merger's scheduled_arrival_utc uses
+-- that wall-clock reading and disagrees with this one on those calls.
 create or replace macro sydney_instant(service_date, seconds) as
     timezone(
         'Australia/Sydney',
-        service_date::timestamp + to_seconds(seconds)
-    );
+        service_date::timestamp + interval 12 hour
+    ) - interval 12 hour + to_seconds(seconds);
 
 -- One row per excluded date, expanded from the seed's ranges.
 --
@@ -404,6 +406,11 @@ from calls;
 -- The feed's own delay fields are not used: its arrival delay is
 -- measured against scheduled departure where the timetable has a
 -- dwell.
+--
+-- fact_trip_stop is not unique on stop_sequence: when a trip's stop
+-- pattern changes during the day, the feed can report two stops at one
+-- sequence. The row at the timetabled stop wins. A lone row at another
+-- stop is kept, so the call stays observed.
 create or replace view call_observation as
 with joined as (
     select
@@ -428,6 +435,10 @@ with joined as (
     left join fact_trip_stop as stop using (
         service_date, trip_id, stop_sequence
     )
+    qualify row_number() over (
+        partition by call.service_date, call.trip_id, call.stop_sequence
+        order by stop.stop_id = call.stop_id desc nulls last, stop.stop_id
+    ) = 1
 ),
 usable as (
     select

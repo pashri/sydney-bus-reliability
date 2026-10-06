@@ -349,6 +349,39 @@ def test_call_observation_measures_delay_from_the_timetable(
     ]
 
 
+def test_call_observation_takes_the_row_at_the_timetabled_stop(
+    con: duckdb.DuckDBPyConnection,
+) -> None:
+    """A sequence the feed reports at two stops keeps the scheduled one."""
+    assert rows_of(
+        con, 'select stop_id, delay_s from call_observation '
+        f"where {TUESDAY} and trip_id = 'k1' and stop_sequence = 2",
+    ) == [('s2', 360)]
+
+
+def test_call_observation_keeps_a_lone_row_at_another_stop(
+    con: duckdb.DuckDBPyConnection,
+) -> None:
+    """A single row at a different stop still observes the call."""
+    assert call_statuses(con, sequence=3)['k3'] == 'observed'
+
+
+def test_sydney_instant_counts_elapsed_time_across_a_clock_change(
+    con: duckdb.DuckDBPyConnection,
+) -> None:
+    """Times count from noon minus 12 hours, not from wall midnight."""
+    assert rows_of(
+        con, "select timezone('UTC', sydney_instant(service_date, seconds)) "
+        "from (values (date '2026-10-03', 27 * 3600 + 1800), "
+        "(date '2026-10-04', 8 * 3600), (date '2026-09-22', 8 * 3600)) "
+        'as t(service_date, seconds)',
+    ) == [
+        (datetime(2026, 10, 3, 17, 30),),
+        (datetime(2026, 10, 3, 21, 0),),
+        (datetime(2026, 9, 21, 22, 0),),
+    ]
+
+
 def test_call_observation_judges_a_first_stop_on_its_departure(
     con: duckdb.DuckDBPyConnection,
 ) -> None:

@@ -242,13 +242,14 @@ def stop_row(
         ``is_reliable``.
     **overrides : object
         ``service_date`` (default 22 September), ``day`` of the
-        prediction, ``arrival``, ``departure``, ``lost_tracking``.
+        prediction, ``arrival``, ``departure``, ``lost_tracking``,
+        ``stop_id`` (default the timetable's stop at ``sequence``).
 
     Returns
     -------
     Row
         Service date, trip, sequence, arrival, departure, status,
-        lost tracking, reliable.
+        lost tracking, reliable, stop.
     """
     service_date = overrides.get('service_date', date(2026, 9, 22))
     day = str(overrides.get('day', service_date))
@@ -258,6 +259,7 @@ def stop_row(
         overrides.get('arrival', predicted),
         overrides.get('departure', predicted),
         status, overrides.get('lost_tracking', False), reliable,
+        overrides.get('stop_id', f's{sequence}'),
     )
 
 
@@ -296,7 +298,7 @@ def build_facts(*, con: duckdb.DuckDBPyConnection) -> None:
         'final_predicted_arrival_utc timestamptz, '
         'final_predicted_departure_utc timestamptz, '
         'schedule_relationship varchar, lost_tracking boolean, '
-        'is_reliable boolean'
+        'is_reliable boolean, stop_id varchar'
     ), rows=stop_rows())
     con.execute(
         'create table fact_trip_stop as select *, '
@@ -318,10 +320,11 @@ def stop_rows() -> list[Row]:
     return [
         stop_row(trip_id='k1', sequence=1, clock='07:59:01'),
         stop_row(trip_id='k1', sequence=2, clock='08:16:00'),
+        stop_row(trip_id='k1', sequence=2, clock='08:30:00', stop_id='s9'),
         stop_row(trip_id='k1', sequence=3, clock='08:18:00'),
         stop_row(trip_id='k3', sequence=1, clock='08:18:59'),
         stop_row(trip_id='k3', sequence=2, clock='08:35:59'),
-        stop_row(trip_id='k3', sequence=3, clock='08:40:30'),
+        stop_row(trip_id='k3', sequence=3, clock='08:40:30', stop_id='s8'),
         stop_row(trip_id='k5', sequence=1, clock='08:40:00',
                  reliable=False, arrival=None),
         stop_row(trip_id='ko', sequence=1, clock='08:41:00'),
