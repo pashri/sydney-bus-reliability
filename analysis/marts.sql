@@ -29,26 +29,33 @@
 --       'build/data/curated/dim_route/*/*.parquet',
 --       hive_partitioning = true, union_by_name = true);
 
--- Seconds past the service day's midnight of a GTFS time, which can
--- exceed 24 hours: '25:10:00' is 90600.
+-- The seconds a GTFS time names, which can exceed 24 hours: '25:10:00'
+-- is 90600.
 create or replace macro gtfs_seconds(value) as
     split_part(value, ':', 1)::integer * 3600
     + split_part(value, ':', 2)::integer * 60
     + split_part(value, ':', 3)::integer;
 
--- The instant a GTFS time names on a service day.
---
--- The seconds are elapsed time from noon minus 12 hours, as GTFS defines
--- it and as the feed's predictions count. On most days that is
--- midnight. On a daylight saving change it is an hour away from
--- midnight, so wall-clock midnight plus N hours names the wrong instant
--- for calls after the change. The merger's scheduled_arrival_utc uses
--- that wall-clock reading and disagrees with this one on those calls.
+-- The instant a GTFS time names on a service day, read on the Sydney
+-- wall clock: midnight plus the time. A wall-clock time that a daylight
+-- saving change skips resolves to an hour later.
 create or replace macro sydney_instant(service_date, seconds) as
     timezone(
         'Australia/Sydney',
-        service_date::timestamp + interval 12 hour
-    ) - interval 12 hour + to_seconds(seconds);
+        service_date::timestamp + to_seconds(seconds)
+    );
+
+-- The instant of a call on a trip, as TfNSW's realtime system schedules
+-- it: the trip's first departure on the wall clock, then elapsed time.
+--
+-- This differs from reading each call on the wall clock only for a trip
+-- that runs across a daylight saving change: its later calls keep their
+-- spacing from the start instead of jumping an hour. GTFS's own rule,
+-- elapsed time from noon minus 12 hours, differs for every trip after
+-- the change and does not match the feed.
+create or replace macro trip_instant(service_date, first_seconds, seconds) as
+    sydney_instant(service_date, first_seconds)
+    + to_seconds(seconds - first_seconds);
 
 -- One row per excluded date, expanded from the seed's ranges.
 --
@@ -350,6 +357,8 @@ with calls as (
         stop_time.pickup_type,
         gtfs_seconds(stop_time.arrival_time) as arrival_s,
         gtfs_seconds(stop_time.departure_time) as departure_s,
+        gtfs_seconds(arg_min(stop_time.departure_time, stop_time.stop_sequence)
+            over trip_calls) as trip_start_s,
         stop_time.stop_sequence
             = min(stop_time.stop_sequence) over trip_calls
             as is_first_stop,
@@ -367,9 +376,9 @@ select
     calls.*,
     not calls.is_last_stop
         and calls.pickup_type is distinct from '1' as is_boarding,
-    sydney_instant(calls.service_date, calls.arrival_s)
+    trip_instant(calls.service_date, calls.trip_start_s, calls.arrival_s)
         as scheduled_arrival_utc,
-    sydney_instant(calls.service_date, calls.departure_s)
+    trip_instant(calls.service_date, calls.trip_start_s, calls.departure_s)
         as scheduled_departure_utc,
     case when is_boarding then calls.departure_s else calls.arrival_s end
         // 3600 as service_hour

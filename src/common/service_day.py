@@ -66,10 +66,13 @@ def scheduled_instant(*, start_date: str, gtfs_time: str) -> datetime:
     The GTFS offset is added as wall-clock time on top of local
     midnight. The spec's literal wording is "noon minus 12 hours",
     i.e. elapsed seconds from a fixed anchor. The two agree except
-    across a daylight-saving transition, where only the wall-clock
-    reading reproduces the printed timetable.
+    across a daylight-saving transition.
 
-    Which convention TfNSW uses is not confirmed.
+    TfNSW's realtime feed uses the wall-clock reading for a trip's
+    first departure and elapsed time after it. So this matches the
+    feed except for the later calls of a trip that runs across the
+    transition, which the feed keeps an unchanged interval from the
+    trip's start.
     """
     midnight = datetime.strptime(start_date, '%Y%m%d').replace(
         tzinfo=SYDNEY,

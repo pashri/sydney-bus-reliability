@@ -290,6 +290,8 @@ def build_trip_stop_query(*, dim_source: str | None) -> str:
     Sydney, not treated as elapsed seconds from a fixed anchor. The
     two conventions differ across a daylight-saving transition, so
     changing this one silently shifts scheduled times by an hour.
+    TfNSW's feed agrees with it except on the later calls of a trip
+    that runs across the transition; see ``scheduled_instant``.
     """
     if dim_source is None:
         join = ''

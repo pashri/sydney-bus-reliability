@@ -366,19 +366,25 @@ def test_call_observation_keeps_a_lone_row_at_another_stop(
     assert call_statuses(con, sequence=3)['k3'] == 'observed'
 
 
-def test_sydney_instant_counts_elapsed_time_across_a_clock_change(
+def test_trip_instant_follows_the_trip_across_a_clock_change(
     con: duckdb.DuckDBPyConnection,
 ) -> None:
-    """Times count from noon minus 12 hours, not from wall midnight."""
+    """A trip starts on the wall clock and runs on in elapsed time."""
     assert rows_of(
-        con, "select timezone('UTC', sydney_instant(service_date, seconds)) "
-        "from (values (date '2026-10-03', 27 * 3600 + 1800), "
-        "(date '2026-10-04', 8 * 3600), (date '2026-09-22', 8 * 3600)) "
-        'as t(service_date, seconds)',
+        con, "select timezone('UTC', trip_instant(service_date, first_s, s)) "
+        'from (values '
+        "(date '2026-10-03', 27 * 3600 + 1800, 27 * 3600 + 2700), "
+        "(date '2026-10-03', 25 * 3600 + 1800, 27 * 3600 + 600), "
+        "(date '2026-10-03', 26 * 3600 + 1800, 26 * 3600 + 2400), "
+        "(date '2026-10-04', 8 * 3600, 8 * 3600), "
+        "(date '2026-09-22', 8 * 3600, 8 * 3600 + 600)"
+        ') as t(service_date, first_s, s)',
     ) == [
-        (datetime(2026, 10, 3, 17, 30),),
+        (datetime(2026, 10, 3, 16, 45),),
+        (datetime(2026, 10, 3, 17, 10),),
+        (datetime(2026, 10, 3, 16, 40),),
         (datetime(2026, 10, 3, 21, 0),),
-        (datetime(2026, 9, 21, 22, 0),),
+        (datetime(2026, 9, 21, 22, 10),),
     ]
 
 
