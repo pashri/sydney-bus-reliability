@@ -9,6 +9,11 @@ represents, what each column holds, and where that value came from.
 Everything here is taken from the code that writes the data. Where the code
 does not settle a question, the entry says so rather than guessing.
 
+The marts, the analysis views built over these tables, are not stored. They
+are defined in [`analysis/marts.sql`](../analysis/marts.sql), with a comment
+above each view saying what its columns mean, and queried locally as the
+README's [Querying the data](../README.md#querying-the-data) describes.
+
 For what the data can and cannot be used to conclude, and the measurements
 behind each limit, see [`methodology.md`](methodology.md). This document
 describes shape; that one describes trust.
@@ -39,7 +44,7 @@ describes shape; that one describes trust.
   - [`dim_shape`](#dim_shape)
   - [`dim_calendar`](#dim_calendar)
   - [`dim_calendar_dates`](#dim_calendar_dates)
-  - [`dim_calendar_exclusion`](#dim_calendar_exclusion)
+  - [`calendar_exclusion`](#calendar_exclusion)
 - [Reference tables](#reference-tables)
   - [`stop_geography`](#stop_geography)
   - [`stop_meshblock`](#stop_meshblock)
@@ -177,7 +182,9 @@ than instants:
   values, are Sydney calendar dates. (`valid_from=` is not: it is a UTC
   instant, below.)
 - `arrival_time` and `departure_time` in `dim_scheduled_stop_time` are
-  Sydney wall-clock readings, and can exceed 24 hours.
+  offsets into the service day, and can exceed 24 hours. On a
+  daylight-saving changeover day, turning one into an instant needs care;
+  see [methodology 10](methodology.md#10-which-midnight-a-timetable-time-counts-from).
 
 **Units.** Durations are seconds, named with an `_s` suffix. Coordinates are
 decimal degrees, WGS 84, the same convention as a phone map.
@@ -233,6 +240,9 @@ Everything sits in one S3 bucket, Amazon's flat file store.
       collector_run/dt=YYYY-MM-DD/<invocation-id>.jsonl
       curation_run/dt=YYYY-MM-DD/<invocation-id>.jsonl
       schedule_check/dt=YYYY-MM-DD/HHMMSS-<invocation-id>.jsonl
+    reference/
+      stop_geography/vintage=YYYY-MM-DD/data.parquet
+      stop_meshblock/vintage=YYYY-MM-DD/data.parquet
 
 The `dt=` and `hour=` path segments are partitions, in the layout most
 query engines call Hive partitioning: the engine reads them as extra columns
@@ -277,7 +287,8 @@ buffers, named for the second it was fetched.
 Because it is binary, you cannot query it with SQL. The compactor decodes
 it into the Parquet tables below, and that is what analysis reads. This section
 exists so you can tell what the pipeline had to work with, and check its
-work.
+work. Raw is kept for 7 days, so only the last week can be checked or
+rebuilt from it.
 
 The two feeds share an outer envelope. A `FeedMessage` carries a list of
 `entity` values, and each entity holds either a `vehicle` (a vehicle
@@ -434,7 +445,7 @@ day from 17 September was replayed under it.
 | `stop_sequence` | `int32` | Position of this stop in the trip's order. Part of the row's identity, because a loop route calls the same stop twice. | Copied from `stop_time_update.stop_sequence`. Null if the feed omitted it, which is not observed in practice. |
 | `route_id` | `string` | Which route. Joins to `dim_route.route_id`. | Copied from `trip_update.trip.route_id`. `''` if omitted. |
 | `final_predicted_arrival_utc` | `timestamp[s, tz=UTC]` | The last real prediction of when the bus reaches this stop. This project's stand-in for the arrival time. | From `arrival.time` on the latest `SCHEDULED` or `SKIPPED` update that sent an arrival. An update with no arrival, or with `arrival.time = 0`, keeps the earlier arrival: the feed blanks the first stop's arrival to 0 once the bus leaves, and 0 read literally is 1970. Null when no real update landed this hour, or when the update carried a delay but no time. |
-| `delay_s` | `int32` | Seconds late against the timetable, from that same last real prediction. Negative means early. | From `arrival.delay`, on the same update as the arrival time. A zero arrival time discards its delay too. Null when no real update landed, or when the update carried a time but no delay. |
+| `delay_s` | `int32` | Seconds late against the timetable, from that same last real prediction. Negative means early. Where the timetable has a dwell, TfNSW measures this against the scheduled departure, not the arrival. | From `arrival.delay`, on the same update as the arrival time. A zero arrival time discards its delay too. Null when no real update landed, or when the update carried a time but no delay. |
 | `final_predicted_departure_utc` | `timestamp[s, tz=UTC]` | The last real prediction of when the bus leaves this stop. | From `departure.time` on the same update. Null when absent. |
 | `departure_delay_s` | `int32` | Seconds late leaving. Negative means early. | From `departure.delay`. Null when absent. |
 | `last_update_at_utc` | `timestamp[s, tz=UTC]` | When the last **real** observation for this stop was made. | `trip_update.timestamp` when the feed sent one, otherwise the poll time. Null when this stop was only ever echoed. |
@@ -500,6 +511,15 @@ then `ADDED`, then anything else - never by message order.
 Once a day, the merger folds about 32 hourly partials into one file per
 service day. These are the tables to query.
 
+After merging `fact_trip_stop` and `fact_trip` together, the merger checks
+the day for anomalies: times 12 hours or more from the timetable, times
+before 2000, repeated stop or trip keys, trip rows that contradict
+themselves, more than 3% of stop rows with no scheduled time, fewer than
+80% of scheduled stop rows reliable, and fewer than 15,000 trips. Each
+check that fails is logged by name, and the `merger-anomalies` alarm fires.
+A day can be re-merged from its partials for 3 days, and replayed from raw
+for 7.
+
 The window it reads runs from an hour before Sydney midnight to seven hours
 after the following midnight, which covers trips timetabled as late as hour
 30 plus a margin for late-written files.
@@ -508,6 +528,13 @@ after the following midnight, which covers trips timetabled as late as hour
 
 **One row is one stop, on one trip, on one service day.** The main table for
 punctuality work.
+
+The key is `(service_date, trip_id, stop_id, stop_sequence)`. It is not
+unique on `stop_sequence` alone: when a trip's stop pattern changes during
+the day, the feed can report two stops at one sequence, and both rows carry
+the timetabled stop's `scheduled_arrival_utc`. Rows with an empty `trip_id`
+share keys too. The marts' `call_observation` keeps the row at the
+timetabled stop.
 
 Written to `curated/fact_trip_stop/service_date=YYYY-MM-DD/data.parquet`,
 where `service_date` is the Sydney service day.
@@ -530,7 +557,7 @@ measured.
 | `stop_sequence` | `int32` | Position of this stop in the trip's order. | Carried through. |
 | `route_id` | `string` | Which route. Joins to `dim_route.route_id`. | Carried through from the most recent hour's row. |
 | `final_predicted_arrival_utc` | `timestamp[us, tz=UTC]` | The day's last real prediction of arrival at this stop. Used as the arrival time. | From the most recent hour that sent an arrival, which can be earlier than the hour the other columns come from. Null when no hour did, or when the last arrival gave a delay but no time. |
-| `delay_s` | `int32` | Seconds late on arrival. Negative means early. | Same source row as `final_predicted_arrival_utc`. Null when no arrival was sent all day. |
+| `delay_s` | `int32` | Seconds late on arrival. Negative means early. Where the timetable has a dwell, TfNSW measures this against the scheduled departure, so the marts compute delay from the timestamps instead. | Same source row as `final_predicted_arrival_utc`. Null when no arrival was sent all day. |
 | `final_predicted_departure_utc` | `timestamp[us, tz=UTC]` | The day's last real prediction of departure. | Same source row. Null when absent. |
 | `departure_delay_s` | `int32` | Seconds late departing. Negative means early. | Same source row. Null when absent. |
 | `last_update_at_utc` | `timestamp[us, tz=UTC]` | When the day's last real observation was made, arrival or not. | From the most recent hour with a real observation. Null when the stop was only ever echoed. |
@@ -539,8 +566,8 @@ measured.
 | `schedule_relationship` | `string` | This stop's status: `SCHEDULED`, `SKIPPED`, `NO_DATA`, `UNSCHEDULED`. | From the most recent hour's row. |
 | `had_vehicle` | `bool` | True if a bus was attached to this trip at any point in the day. | True if any hour said so. Never null. |
 | `lost_tracking` | `bool` | True when the bus stopped reporting before reaching this stop and only echoes followed. The prediction is stale. | Recomputed for the whole day: true when the day's latest observation of any kind is later than its latest real one. False when there was never a real observation. Never null. |
-| `is_reliable` | `bool` | True when the arrival time is worth trusting: a real delay exists, tracking did not drop, the arrival is after 2000 (never an epoch artefact), and the arrival was last sent no more than 60 seconds before the predicted arrival (`arrival_updated_at_utc`, not `last_update_at_utc`, so a later departure-only update does not make a stale arrival fresh). **Headline figures use only rows where this is true.** | Computed. False when any condition fails, including when a delay exists but no predicted arrival time does, leaving nothing to compare against. Never null. The 60-second rule is explained in [methodology 1](methodology.md#1-arrival-times-are-predictions-not-observations). |
-| `scheduled_arrival_utc` | `timestamp[us, tz=UTC]` | When the timetable said the bus should arrive. Subtract from `final_predicted_arrival_utc` to get lateness directly. | Joined from `dim_scheduled_stop_time` on `trip_id` and `stop_sequence`, using the latest snapshot checked on or before this service date in Sydney time, or the earliest snapshot for a day before any was captured. Its `HH:MM:SS` reading, which may exceed 24 hours, is added to Sydney midnight and converted to UTC. Null when no snapshot exists at all, or when the snapshot has no matching row. Which midnight it counts from is settled one way here and is not confirmed against TfNSW - see [methodology 10](methodology.md#10-which-midnight-a-timetable-time-counts-from). |
+| `is_reliable` | `bool` | True when the arrival time is worth trusting: a real delay exists, tracking did not drop, the arrival is after 2000 (never an epoch artefact), and the arrival was last sent no more than 60 seconds before the predicted arrival (`arrival_updated_at_utc`, not `last_update_at_utc`, so a later departure-only update does not make a stale arrival fresh). The marts' `is_judged` builds on this, and at the first stop replaces it with a test on the departure's own update time. | Computed. False when any condition fails, including when a delay exists but no predicted arrival time does, leaving nothing to compare against. Never null. The 60-second rule is explained in [methodology 1](methodology.md#1-arrival-times-are-predictions-not-observations). |
+| `scheduled_arrival_utc` | `timestamp[us, tz=UTC]` | When the timetable said the bus should arrive. Subtracting it from `final_predicted_arrival_utc` gives arrival lateness approximately; see the caveat at the end of this row, and `call_observation` in `analysis/marts.sql` for the measure the analysis uses. | Joined from `dim_scheduled_stop_time` on `trip_id` and `stop_sequence`, using the latest snapshot checked on or before this service date in Sydney time, or the earliest snapshot for a day before any was captured. Its `HH:MM:SS` reading, which may exceed 24 hours, is added to wall-clock Sydney midnight and converted to UTC. Null when no snapshot exists at all, or when the snapshot has no matching row. This matches TfNSW's realtime timetable except on the later calls of a trip that ran across a daylight-saving change, which TfNSW keeps at their elapsed time from the trip's start. The marts do not use it - see [methodology 10](methodology.md#10-which-midnight-a-timetable-time-counts-from). |
 
 Days before the first timetable was captured borrow the earliest snapshot,
 on the assumption that the timetable did not change in between. That
@@ -701,7 +728,8 @@ for the count and what it means for analysis.
 ### `dim_agency`
 
 **One row is one operator.** From `agency.txt`. Join `dim_route.agency_id`
-to it for operator names.
+to it for operator names. Only snapshots from `2026-09-23T230911Z` onwards
+have it; earlier ones were written before it was kept.
 
 | Column | Type | What it means | Where it comes from |
 | --- | --- | --- | --- |
@@ -791,7 +819,7 @@ not hand you a Sydney filter; you apply one. See
 | `trip_id` | `string` | Which run. Joins to `dim_trip`. | Copied from `stop_times.txt`. |
 | `stop_id` | `string` | Which stop. Joins to `dim_stop`. | Copied. |
 | `stop_sequence` | `int32` | Where this call falls in the run's order. Converted to a number so it sorts correctly. | Parsed from text. |
-| `arrival_time` | `string` | Scheduled arrival, as `HH:MM:SS`, **Sydney wall clock, not UTC**. The hour can exceed 24: `25:10:00` means 01:10 the next morning. Kept as written, because resolving it to an instant needs a date. | Copied verbatim. |
+| `arrival_time` | `string` | Scheduled arrival, as `HH:MM:SS`, **Sydney time, not UTC**, as an offset into the service day. The hour can exceed 24: `25:10:00` means 01:10 the next morning. On a daylight-saving changeover day, see [methodology 10](methodology.md#10-which-midnight-a-timetable-time-counts-from) for how it becomes an instant. Kept as written, because resolving it to an instant needs a date. | Copied verbatim. |
 | `departure_time` | `string` | Scheduled departure, same convention. | Copied verbatim. |
 | `shape_dist_traveled` | `double` | How far along the route's drawn path this stop sits, in **metres**, measured from the first point of the shape. | Parsed from text. Null when blank. The unit is TfNSW's answer alone: GTFS lets the publisher choose and asks only that the two files agree, while TfNSW's guide states metres for both. The values are not checked against the shape geometry anywhere in this project. |
 | `timepoint` | `string` | `1` when the time is an exact timetabled time, `0` when it is approximate or interpolated. | Copied verbatim. Null when blank or absent. Not in snapshots written before this column was kept. |
@@ -847,13 +875,15 @@ date on which service is added or removed, such as a public holiday. From
 | `date` | `string` | The day the exception applies to, `YYYYMMDD`, Sydney local. | Copied verbatim. |
 | `exception_type` | `string` | `1` means service runs on this date even though the weekly pattern says otherwise. `2` means it does not run. Kept as text. | Copied verbatim. |
 
-### `dim_calendar_exclusion`
+### `calendar_exclusion`
 
 **One row is one calendar date carrying one reason it is not an ordinary
 school-term day.** Unlike every other table here, this one is not derived
-from a feed: it is hand-built once a year from published NSW calendars,
-committed as `analysis/calendar_exclusions_<year>.csv`, and expanded from
-date ranges into individual dates by `analysis/calendar_exclusion.py`.
+from a feed and is not stored in S3. It is hand-built once a year from
+published NSW calendars, committed as
+`analysis/calendar_exclusions_<year>.csv`, and expanded from date ranges
+into individual dates by the `calendar_exclusion` view in
+`analysis/marts.sql`. The `term_weekday` view lists the weekdays left over.
 
 It exists so that peak-hour comparisons can be restricted to term time.
 School holidays change traffic and patronage enough that including them
@@ -861,14 +891,16 @@ alongside term weekdays compares two different things.
 
 | Column | Type | What it means | Where it comes from |
 | --- | --- | --- | --- |
-| `date` | `date` | The excluded day, Sydney local. | Expanded from the seed row's `start_date`/`end_date`, which are inclusive of both endpoints. |
+| `day` | `date` | The excluded day, Sydney local. | Expanded from the seed row's `start_date`/`end_date`, which are inclusive of both endpoints. |
 | `exclusion_type` | `string` | `public_holiday`, `school_holiday`, or `school_development_day`. | Copied from the seed. |
 | `reason` | `string` | The event's published name, such as `Spring holidays`. | Copied from the seed. |
-| `source` | `string` | URL the date was transcribed from. | Copied from the seed. |
 
-A date can appear more than once, so the grain is `(date, exclusion_type)`
-and never `date` alone. Labour Day falls inside the spring holidays and
-carries a row of each kind; joining on `date` without deduplicating will
+The seed CSV also has a `source` column, the URL each row was transcribed
+from, which the view does not carry.
+
+A date can appear more than once, so the grain is `(day, exclusion_type)`
+and never `day` alone. Labour Day falls inside the spring holidays and
+carries a row of each kind; joining on `day` without deduplicating will
 double-count that day's traffic.
 
 The public holiday rows are transcribed by hand. The data.gov.au holidays
@@ -1066,10 +1098,10 @@ zero look identical and nothing else in the row tells them apart.
 | `started_at_utc` | `string` | When the run began. ISO 8601, UTC. | Recorded at entry. |
 | `finished_at_utc` | `string` | When the run finished. ISO 8601, UTC. Subtract from the above for elapsed time. | Recorded as the record is built. |
 | `partition` | `string` | What the run covered. `YYYY-MM-DDTHH` for the compactor, being one UTC hour. `YYYY-MM-DD` for the merger, being one Sydney service date. | Formatted from the target. |
-| `objects_expected` | `int` | How many input files there should have been. For the compactor, 420 per hour: 360 position polls plus 60 trip-update polls, at the deployed cadence. For the merger, the number of hours the service day's window covers, times two tables. | A constant for the compactor; counted from the window for the merger. |
+| `objects_expected` | `int` | How many input files there should have been. For the compactor, 420 per hour: 360 position polls plus 60 trip-update polls, at the deployed cadence. For the merger, the number of hours the service day's window covers, times three tables (trip, trip stop and vehicle position). | A constant for the compactor; counted from the window for the merger. |
 | `objects_read` | `int` | How many actually existed. **Lower than expected means a short run.** A failed poll leaves a permanent gap; a missing hour means the compactor failed or its partial expired before the merge. | Counted. The merger checks S3 directly rather than trusting the query. |
 | `rows_in` | `int` | Compactor: real trip-stop observations seen, before reduction. Merger: always `0`; it folds already-curated files, so there is nothing to count. | Counted during reduction. |
-| `rows_out` | `int` | Rows written. Compactor: both partials added together. Merger: all three fact tables added together. | Counted from the writers. |
+| `rows_out` | `int` | Rows written. Compactor: all three partials added together. Merger: every table that run wrote, including `fact_collector_run`, added together. | Counted from the writers. |
 | `dupes_collapsed` | `int` | Compactor: repeated vehicle-position samples discarded. A large number is normal - the feed is polled about as often as it refreshes. Merger: always `0`. | Counted by the deduplicator. |
 | `dupes_differing_position` | `int` | Compactor: samples sharing a vehicle and timestamp while reporting a different place. These are kept, not collapsed, which is why the position is part of the deduplication key. Watching this number is how you would notice that changing. Merger: always `0`. | Counted by the deduplicator. |
 | `unjoined_route_ids` | `int` | Intended to count live route ids with no timetable match. Always `0` in both jobs - neither currently measures it. Treat as not recorded, not as zero. | Not measured. |

@@ -5,7 +5,8 @@
 Collects Transport for NSW GTFS-Realtime bus feeds and folds them into a
 queryable history, working towards measuring how reliable Sydney's buses
 are. Collection, compaction, the daily service-day merge and the static
-timetable snapshots are all deployed; analysis and marts are not built yet.
+timetable snapshots are all deployed, and the marts are queryable locally
+(see [Querying the data](#querying-the-data)).
 
 Contains public sector information licensed under the Creative Commons
 Attribution 4.0 licence. Data source: Transport for NSW.
@@ -76,6 +77,132 @@ layer step, and nothing to build by hand on a fresh clone.
 ## Test
 
     uv run pytest
+
+## Querying the data
+
+The data is queried locally, in two steps:
+
+1. **Download.** `scripts.pull_curated` copies the curated tables from S3
+   into `build/data/` as Parquet files.
+2. **Build the marts.** `analysis.marts` writes a DuckDB file,
+   `build/marts.duckdb`, holding the marts: views defined in
+   [`analysis/marts.sql`](analysis/marts.sql).
+
+The marts are views, not tables, so they hold no data of their own. Each
+query reads the downloaded Parquet files again, so it sees whatever the
+last download fetched. Nothing is read from S3 at query time.
+
+### Downloading and building
+
+From the repo root, with a profile that can read the bucket:
+
+    uv run python -m scripts.pull_curated build/data --profile <profile>
+    uv run python -m analysis.marts build/data build/marts.duckdb
+
+The download mirrors the bucket. It fetches new and changed files,
+including days the merger has rewritten, and deletes local files whose
+key has gone from S3. After the first run it fetches only what changed.
+Run it again to bring in new days. The views see them without a rebuild.
+
+Rebuild the DuckDB file after any change to `analysis/marts.sql`, because
+the file stores the SQL as it was when built. The build deletes the file
+and writes it fresh, so keep nothing else in it. The views name the
+downloaded files by absolute path, so moving `build/data/` breaks them
+until the next build.
+
+### The views
+
+- `mart_trip`: one row per scheduled trip per service day, with its
+  status (`ran`, `incomplete`, `cancelled` or `unknown`)
+- `mart_stop_hour`: one row per stop, route, direction, service day and
+  hour, with call counts, on-time counts and headway sums
+- `route_league`: routes ranked by period, on term weekdays only
+- `coverage`: scheduled calls per SA2, period and day type, including
+  zero
+
+The other views are their inputs. `describe mart_trip` lists a view's
+columns, and the comment above each view in `analysis/marts.sql` says
+what its columns mean.
+
+### Command line
+
+Install the DuckDB CLI with `brew install duckdb`. It must be the same
+version as the `duckdb` Python package that built the file, or newer:
+
+    uv run python -c 'import duckdb; print(duckdb.__version__)'
+    duckdb --version
+
+Open the file read-only, so other sessions can open it at the same time:
+
+    duckdb -readonly build/marts.duckdb
+
+At the `D` prompt, end each statement with `;`:
+
+    .tables
+    .timer on
+    select service_date, count(*) as trips,
+           round(100 * avg((status = 'ran')::int), 1) as pct_ran
+    from mart_trip
+    group by service_date
+    order by service_date;
+    .exit
+
+For a single query, pass it with `-c`:
+
+    duckdb -readonly build/marts.duckdb -c "describe route_league"
+
+`COPY` writes a result to a file, even in a read-only session:
+
+    copy (select * from route_league) to 'route_league.csv';
+
+`stop_geography_stale` uses the spatial extension, which the CLI does not
+load by itself. Install it once per DuckDB version, then load it in each
+session, or add `LOAD spatial;` to `~/.duckdbrc` to load it every time:
+
+    INSTALL spatial;
+    LOAD spatial;
+
+### From an application
+
+Any DuckDB client can open the file: Python, R, Node.js, Java through
+JDBC (which also covers GUI tools such as DBeaver), Go and Rust among
+them. Open it read-only. DuckDB lets many processes read a file at once,
+or one process write to it, but not both. The client must run on the
+machine that holds `build/data/`, because the views read it by path.
+
+From Python in this repo:
+
+    import duckdb
+
+    con = duckdb.connect('build/marts.duckdb', read_only=True)
+    rows = con.sql('select * from route_league limit 10').fetchall()
+
+`.arrow()` returns a pyarrow table instead, and `.df()` a pandas data
+frame where pandas is installed. `analysis.marts.connect` skips the build
+step: it creates every view in memory from the current
+`analysis/marts.sql`, with the spatial extension loaded:
+
+    from pathlib import Path
+    from analysis.marts import connect
+
+    con = connect(root=Path('build/data'))
+
+### Speed and frozen copies
+
+Every query recomputes from the Parquet files. A day-by-day count over
+`mart_trip` takes a few seconds, and `route_league` about half a minute.
+To keep a result fixed, or to query it many times, copy it into a table
+in a separate DuckDB file. Open that file, attach the marts read-only,
+and copy:
+
+    duckdb build/frozen.duckdb
+
+    attach 'build/marts.duckdb' as marts (read_only);
+    create table route_league_2026_10_08 as
+        select * from marts.route_league;
+
+The copy does not change when the data is downloaded again, and reading it
+takes milliseconds.
 
 ## Replaying from raw
 

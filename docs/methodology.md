@@ -3,11 +3,12 @@
 This document explains what the data in this project can and cannot tell
 you, and gives the measurement behind each limit.
 
-Every figure here comes from decoding a day of the collected feeds, which
+Most figures here come from decoding a day of the collected feeds, which
 happened before the pipeline was designed. That order matters: the design
 answers what Transport for NSW actually publishes, rather than everything
 the GTFS specification would permit a publisher to do. Some questions a
-single day cannot settle. Where that is the case, the limit says so.
+single day cannot settle. Where that is the case, the limit says so. Later
+sections name the days they were measured on.
 
 ## Where the data comes from
 
@@ -53,13 +54,14 @@ Friday's timetable is the one it runs on.
 | 6. That gap is not worse in Western Sydney | Checked, because the project's headline comparison depends on it. |
 | 7. The feeds cover all of NSW | Sydney is a filter you apply, not something the feed gives you. |
 | 8. The timetable only looks forward | Days before collection began cannot be reconstructed. |
-| 9. Unmatched ids are kept, not guessed | A small number of rows have no route attached, on purpose. |
-| 10. One timezone convention is unverified | It only matters on the day daylight saving starts. |
-| 11. Two alarms cry wolf by design | Expect a self-clearing alert on 4 October. |
+| 9. Unmatched ids are kept, not guessed | A small number of rows carry a route id that matches no route, on purpose. |
+| 10. A clock change moves a timetable's midnight | TfNSW starts each trip on the wall clock. On 3-4 October 2026 many night buses ran an hour behind it. |
+| 11. The not-running alarms can cry wolf | A new alarm fires once before its function first runs. |
 | 12. Unknown codes read as missing | Absent means "not sent or not recognised". |
 | 13. `lost_tracking` mixes two clocks | Checked, and it cannot change the answer. |
 | 14. The holiday list is hand-built | Checked against the timetable's own cancellations; nothing missing in range. |
 | 15. A trip's status is a rule, not a record | `mart_trip` applies one; its evidence columns support others. |
+| 16. A bad day must be caught within a week | The merger flags it; after 7 days nothing can rebuild it. |
 
 ---
 
@@ -73,15 +75,20 @@ each saying when it currently expects the bus to get there. The arrival
 itself is never reported.
 
 So this project takes the last prediction issued before the bus passed the
-stop and treats it as the arrival time. How good that stand-in is depends
-entirely on when the bus stopped talking: one reporting right up to the kerb
-gives a prediction worth trusting, while one that goes quiet five minutes
-out leaves a guess frozen at whatever it last said.
+stop and treats it as what happened. At a stop where people board, that is
+the predicted departure; at the last stop and at set-down-only stops, the
+predicted arrival. How good that stand-in is depends entirely on when the
+bus stopped talking: one reporting right up to the kerb gives a prediction
+worth trusting, while one that goes quiet five minutes out leaves a guess
+frozen at whatever it last said.
 
-To keep that from quietly corrupting the results, any row whose final update
-arrived more than 60 seconds before the predicted arrival is marked
-`is_reliable = false` and left out of headline figures. Every arrival-time
-number in this project depends on this stand-in and this exclusion rule.
+To keep that from quietly corrupting the results, a call is judged only if
+its time was last updated no more than 60 seconds before it. Away from the
+first stop that is `is_reliable`, which tests the arrival's update time; at
+the first stop the feed blanks the arrival once the bus leaves, so the
+departure's own update time is tested instead. Calls that fail are left out
+of on-time figures. Every number in this project depends on this stand-in
+and this exclusion rule.
 
 ### 2. `vehicle_id` identifies a trip, not a bus
 
@@ -128,16 +135,30 @@ Timetables express times as an offset into the service day, and services
 running past midnight use hours past 24 - a trip at `25:10:00` leaves at
 1:10 am the next morning.
 
-This project converts those times by adding the offset to local midnight.
-The GTFS specification defines it slightly differently, as noon minus twelve
-hours. On any ordinary day the two agree exactly; they part company only
-across a daylight-saving transition, where they land an hour apart. Which
-one Transport for NSW follows has not been confirmed.
+The GTFS specification counts that offset from noon minus twelve hours on
+the service day. Read literally, that is elapsed time, and across a
+daylight-saving change it lands an hour away from the wall-clock reading,
+midnight plus the offset. On any other day the two agree exactly.
 
-There is a clean way to settle it, using the echo finding above: compare the
-echoed arrival times against our own calculation for trips crossing 02:00 on
-4 October 2026, when Sydney moves to daylight saving. If the conventions
-disagree, the echoes will show it.
+The 4 October 2026 changeover showed what Transport for NSW does, using the
+timetable times the feed echoes back for trips with no bus assigned
+(section 3). Its realtime system reads each trip's first departure on the
+wall clock, then keeps the trip's own spacing in elapsed time. Trips that
+started after the change matched the wall-clock reading to the second.
+Trips that started before it and ran across it matched elapsed time, and a
+trip timetabled in the skipped hour started an hour later on the clock.
+Neither reading alone fits every trip. The marts follow TfNSW's rule.
+`fact_trip_stop.scheduled_arrival_utc`, as the merger stores it, reads every
+call on the wall clock, so it differs from TfNSW only on the later calls of
+a trip that ran across the change.
+
+That night, many buses ran about an hour behind that timetable. For most
+calls after 03:00, TfNSW's own feed reported a delay of close to an hour,
+concentrated in a few agencies, and on the morning of 4 October part of the
+feed at some agencies was still an hour late until about midday. The data
+does not say why; operators working to the old clock would explain both.
+They are kept as measured: by TfNSW's timetable those buses were an hour
+late. The next change falls in April 2027, after collection ends.
 
 ### 13. `lost_tracking` compares two different clocks
 
@@ -156,7 +177,8 @@ never which value is last.
 
 Peak-hour comparisons are restricted to school-term weekdays, because
 holiday traffic and term traffic are different things. Which days those are
-comes from `dim_calendar_exclusion`, a list typed out once a year from
+comes from the `calendar_exclusion` and `term_weekday` views in
+`analysis/marts.sql`, expanded from a list typed out once a year from
 published NSW calendars rather than pulled from a feed. The obvious failure
 is a forgotten public holiday: it would pass silently into the results as an
 ordinary weekday with strangely light traffic.
@@ -264,10 +286,10 @@ calendar ran from 17 September 2026 to 1 January 2027, but only 3 services
 were active on the day it was generated, against 98 the following day.
 
 It therefore cannot reconstruct a day that has already gone. That has a
-direct consequence for this project: no timetable file was captured on or
-before 16 to 18 September 2026. Those days borrow the earliest snapshot,
-from 19 September, on the assumption that the timetable did not change in
-between. The assumption cannot be checked, because the bundle itself was not
+direct consequence for this project: no timetable was captured before 03:34
+on 20 September 2026, Sydney time. Service days 16 to 19 September borrow
+that earliest snapshot, on the assumption that the timetable did not change
+in between. The assumption cannot be checked, because the bundle itself was not
 archived until later.
 
 ### 9. Identifiers that don't match are recorded, not repaired
@@ -277,9 +299,12 @@ timetable. One of them, `_144`, is genuinely unresolvable: the route number
 `144` exists under two different operators, `2508_144` and `2514_144`, and
 nothing in the data says which one a bare `_144` means.
 
-Rows like this are kept with an empty route reference and counted in the
-audit record. They are never resolved by guessing at a close match, because
-a plausible wrong answer is worse than a visible gap.
+Rows like this keep the feed's id, which simply fails to join `dim_route`.
+They are not yet counted anywhere: the audit record's unjoined-id counters
+are always zero. They are never resolved by guessing at a close match,
+because a plausible wrong answer is worse than a visible gap. The marts take
+a call's route from the timetable's trip, not from the feed, so an
+unmatched feed route id does not affect them.
 
 ---
 
@@ -335,10 +360,11 @@ dwell, so the marts compute every delay from the timestamps instead.
 
 ## Notes for running the pipeline
 
-### 11. Two alarms raise false alerts on purpose
+### 11. The not-running alarms can raise false alerts
 
-The alarms that watch for a function failing to run are configured to treat
-silence as a problem. This is deliberate: when a scheduled function does not
+The four alarms that watch for a function failing to run (the collector,
+compactor, schedule loader and merger) are configured to treat silence as a
+problem. This is deliberate: when a scheduled function does not
 run, it reports nothing at all rather than reporting an error, so silence is
 the only symptom there is.
 
@@ -352,10 +378,10 @@ separate error alarms are for. This already happened:
 `schedule-loader-not-running` alerted at 15:19 on 19 September and cleared
 at 15:22.
 
-A 24-hour alarm watching a once-a-day job is also stable except on 4
-October, when the switch to daylight saving shifts the run by an hour and
-can place two runs in one window and none in the next. Expect one more
-self-clearing email around that date. Neither case is an outage.
+A 24-hour alarm watching a once-a-day job could in principle misfire on a
+daylight-saving change, which shifts the run by an hour and can place two
+runs in one window and none in the next. Across the 4 October 2026 change
+neither 24-hour alarm fired. Neither case would be an outage.
 
 ### 12. Codes we don't recognise arrive as missing
 
@@ -376,3 +402,21 @@ field is read directly too: a stop's `schedule_relationship`, which reads as
 `SCHEDULED` when the value is unrecognised or was never sent. That is
 exactly the confusion the check exists to avoid, and it is worth knowing
 before treating a `SCHEDULED` stop as something the feed said.
+
+### 16. A bad day must be caught within a week
+
+After merging a service day, the merger checks it for anomalies: times
+12 hours or more from the timetable, times before 2000, repeated keys, trip
+rows that contradict themselves, too many stop rows with no scheduled time,
+too few reliable ones, and too few trips. A failed check is logged by name
+and fires the `merger-anomalies` alarm. The check runs only when one merge
+writes both `fact_trip_stop` and `fact_trip`.
+
+The window to act is short. A day can be re-merged from its hourly partials
+for 3 days. After that it can only be rebuilt from raw, which is kept for
+7 days. Past a week, a day stays as it was merged: a later fix to the
+compactor or merger reaches only the days still in raw. Before the
+retention was cut from 30 days to 7 in October 2026, 17-25 September were
+replayed from raw under the current compactor and merger, later days were
+merged by them directly, and 17 September to 5 October were checked
+through the marts.
